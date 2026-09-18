@@ -14,3 +14,7 @@ build
 build/*
 test_tadas_crahs
 test*
+
+# unit tests are kept
+!tests/
+!tests/**

@@ -407,7 +407,7 @@ def check_simulationInfo(config: dict) -> Tuple[dict, bool]:
             allStepsOk *= mdOptionsOk
         elif simulationWithDefaults["simulationType"] == "META":
             disorders, metaOptionsOk = check_metadynamics_options(simulationWithDefaults, disorders)
-            allStepsOk *+ metaOptionsOk
+            allStepsOk *= metaOptionsOk
         elif simulationWithDefaults["simulationType"] == "EM":
             disorders, emOptionsOk, simulationWithDefaults = check_em_options(simulationWithDefaults, disorders)
             allStepsOk *= emOptionsOk
@@ -924,71 +924,49 @@ def check_metadynamics_options(simulation: dict, disorders: dict) -> Tuple[dict,
             ## check through each bias
             disorders["metaDynamicsInfo"]["biases"] = {}
             for biasCount, bias in enumerate(biases):
-                disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"] = []
-                ## make sure bias is a dictionary
-                if not isinstance(bias, dict):
-                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("biases must be a list of biases (check README for more details)")
-                    metaOptionsOk = False
-                ## check for biasVar entry in bias
-                biasVar = bias.get("biasVar", None)
-                if biasVar is None:
-                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("No biasVar specified in bias")
-                    metaOptionsOk = False
-                ## make sure biasVar is a string with an allowed value
-                else:
-                    if not isinstance(biasVar, str):
-                        disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("biasVar must be 'rmsd', 'torsion', 'distance', or 'angle'")
-                        metaOptionsOk = False
-                    elif not biasVar.lower() in ["rmsd", "torsion", "distance", "angle"]:
-                        disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("biasVar must be 'rmsd', 'torsion', 'distance', or 'angle'")
-                        metaOptionsOk = False
-                ## check for minValue in bias
-                minValue = bias.get("minValue", None)
-                if minValue is None:
-                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("No minValue specified in bias")
+                biasDisorders = check_bias_variable(bias, requireGrid=True)
+                if len(biasDisorders) > 0:
+                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"] = biasDisorders
                     metaOptionsOk = False
                 else:
-                    if not isinstance(minValue, (int, float)):
-                        disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("minValue must be a number")
-                        metaOptionsOk = False
-                ## check for maxValue in bias
-                maxValue = bias.get("maxValue", None)
-                if maxValue is None:
-                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("No maxValue specified in bias")
-                    metaOptionsOk = False
-                else:
-                    if not isinstance(maxValue, (int, float)):
-                        disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("maxValue must be a number")
-                        metaOptionsOk = False
-                ## check for bias in bias
-                biasWidth = bias.get("biasWidth", None)
-                if biasWidth is None:
-                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("No biasWidth specified in bias")
-                    metaOptionsOk = False
-                else:
-                    if not isinstance(biasWidth, (int, float)):
-                        disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("biasWidth must be a number")
-                        metaOptionsOk = False
-                ## check fir biasSelection in bias
-                biasSelection = bias.get("selection", None)
-                if biasSelection is None:
-                    disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("No selection specified in bias")
-                    metaOptionsOk = False
-                else:
-                    ## make sure selection is a dictionary
-                    if not isinstance(biasSelection, dict):
-                        disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].append("selection must be a dictionary")
-                        metaOptionsOk = False
-                    else:
-                        ## check selection is correctly formatted
-                        selectionDisorders = check_selection({"selection": biasSelection})
-                        if len(selectionDisorders) > 0:
-                            disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"].extend(selectionDisorders)
-                            metaOptionsOk = False
-                if len(disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"]) == 0:
                     disorders["metaDynamicsInfo"]["biases"][f"bias_{biasCount}"] = None
 
     return disorders, metaOptionsOk
+#########################################################################
+def check_bias_variable(bias: dict, requireGrid: bool = True) -> list:
+    """
+    Checks one bias variable (metadynamics) or collective variable (GaMD monitoring) dictionary.
+    With requireGrid, minValue, maxValue and biasWidth are required (metadynamics).
+    """
+    biasDisorders = []
+    if not isinstance(bias, dict):
+        return ["biases must be a list of dictionaries (check README for more details)"]
+    ## check for biasVar entry in bias
+    biasVar = bias.get("biasVar", None)
+    allowedBiasVars = ["rmsd", "torsion", "distance", "com_distance", "angle"]
+    if biasVar is None:
+        biasDisorders.append("No biasVar specified in bias")
+    elif not isinstance(biasVar, str) or not biasVar.lower() in allowedBiasVars:
+        biasDisorders.append("biasVar must be 'rmsd', 'torsion', 'distance', 'com_distance', or 'angle'")
+    ## check grid parameters
+    if requireGrid:
+        for parameterName in ["minValue", "maxValue", "biasWidth"]:
+            parameterValue = bias.get(parameterName, None)
+            if parameterValue is None:
+                biasDisorders.append(f"No {parameterName} specified in bias")
+            elif not isinstance(parameterValue, (int, float)):
+                biasDisorders.append(f"{parameterName} must be a number")
+    ## check selection(s): com_distance needs two
+    selectionKeys = ["selection", "selection2"] if isinstance(biasVar, str) and biasVar.lower() == "com_distance" else ["selection"]
+    for selectionKey in selectionKeys:
+        biasSelection = bias.get(selectionKey, None)
+        if biasSelection is None:
+            biasDisorders.append(f"No {selectionKey} specified in bias")
+        elif not isinstance(biasSelection, dict):
+            biasDisorders.append(f"{selectionKey} must be a dictionary")
+        else:
+            biasDisorders.extend(check_selection({"selection": biasSelection}))
+    return biasDisorders
 #########################################################################
 def check_nvt_npt_options(simulation: dict, stepName: str, disorders: dict) -> Tuple[dict,bool,dict]:
     ## check for required args for a nvt or npt simulation
