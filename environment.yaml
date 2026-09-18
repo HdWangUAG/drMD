@@ -4,7 +4,10 @@ channels:
 dependencies:
   - python=3.10
   - ambertools=23
-  - openmm
+  # openmm pinned: conda-forge 8.6 builds link CUDA 13, whose PTX fails to load
+  # on CUDA 12 drivers (CUDA_ERROR_UNSUPPORTED_PTX_VERSION).
+  - openmm=8.2.*
+  - cuda-version=12.4
   - openbabel
   - pango
   - pip
