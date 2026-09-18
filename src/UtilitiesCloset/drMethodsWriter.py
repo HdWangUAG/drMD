@@ -432,6 +432,12 @@ def get_simulation_type_text(sim: Dict, progressionWord: str) -> str:
     elif simulationType == "META":
         article = "A" if capitalise else "a"
         return f"{progressionWord}{article} metadynamics simulation was performed"
+    elif simulationType.upper() == "GAMD":
+        article = "A" if capitalise else "a"
+        stageText = {"cmd_stats": "conventional MD stage (collecting potential energy statistics)",
+                     "gamd_equil": "equilibration stage (boost potential applied, boost parameters updated)",
+                     "gamd_prod": "production stage (boost parameters fixed)"}[sim["gamdInfo"]["stage"]]
+        return f"{progressionWord}{article} Gaussian accelerated molecular dynamics (GaMD) {stageText} was performed"
     
 ##########################################################################################
 def get_restraints_methods_text(sim: Dict) -> str:
@@ -624,9 +630,14 @@ def write_per_step_simulation_methods(methodsFile: FilePath, sim: dict, stepInde
             else:
                 methods.write(f"This simulation was performed using a timestep of {sim['timestep']}. ")
 
+        ## flush before the sub-writers below re-open the file, so their text lands after ours
+        methods.flush()
         ## deal with metadynamics   
         if sim["simulationType"] == "META":
             write_metadynamics_simulation_methods(methodsFile, sim)
+        ## deal with GaMD
+        if sim["simulationType"].upper() == "GAMD":
+            write_gamd_simulation_methods(methodsFile, sim)
 
         ## deal with restraints
         methods.write(f"{get_restraints_methods_text(sim)}\n")
@@ -671,6 +682,48 @@ def write_metadynamics_simulation_methods(methodsFile: FilePath, sim: dict) -> N
 
 
 ##########################################################################################
+def write_gamd_simulation_methods(methodsFile: FilePath, sim: dict) -> None:
+    """
+    Writes the methods for a GaMD simulation stage
+
+    Args:
+        methodsFile: (FilePath) Path to methods file
+        sim: (dict) Simulation dictionary
+
+    Returns:
+        None
+    """
+    gamdInfo = sim["gamdInfo"]
+    boostText = {"total": "the total potential energy",
+                 "dihedral": "the dihedral potential energy",
+                 "dual": "both the dihedral and the total potential energy (dual boost)"}[gamdInfo["boostType"].lower()]
+    thresholdText = {"lower": "the lower bound (E = Vmax)",
+                     "upper": "the upper bound (E = Vmin + (Vmax - Vmin)/k0), falling back to the lower bound where k0 would leave (0, 1]"}[gamdInfo["thresholdMode"].lower()]
+    ensembleText = {"NPT": "the *isothermal-isobaric* (NpT) ensemble", "NVT": "the canonical (NVT) ensemble"}[gamdInfo["ensemble"].upper()]
+    with open(methodsFile, "a", encoding = "utf-8") as methods:
+        methods.write(f"Gaussian accelerated MD [Ref. {cite('gamd')}] adds a harmonic boost potential ΔV = ½ k (E − V)² whenever ")
+        methods.write(f"the potential energy V lies below a threshold E. Here the boost was applied to {boostText}, ")
+        methods.write(f"with the threshold set to {thresholdText} and the boost parameters derived from the maximum, minimum, ")
+        methods.write(f"mean and standard deviation of the potential energy collected during the preceding stage(s). ")
+        methods.write(f"The upper limit of the standard deviation of the boost potential (σ0) was ")
+        if gamdInfo["boostType"].lower() == "dual":
+            methods.write(f"{gamdInfo['sigma0P']} kcal/mol for the total boost and {gamdInfo['sigma0D']} kcal/mol for the dihedral boost. ")
+        elif gamdInfo["boostType"].lower() == "total":
+            methods.write(f"{gamdInfo['sigma0P']} kcal/mol. ")
+        else:
+            methods.write(f"{gamdInfo['sigma0D']} kcal/mol. ")
+        if gamdInfo["stage"] == "gamd_equil":
+            methods.write(f"During this stage the boost parameters were re-derived every {gamdInfo['updateInterval']} steps. ")
+        if gamdInfo.get("excludeRestraintsFromBoost", True):
+            methods.write("Any restraint potentials were kept in a separate force group that was excluded from the boosted potential energy. ")
+        else:
+            methods.write("Restraint potentials, where present, were included in the boosted potential energy. ")
+        methods.write(f"All GaMD stages were run in {ensembleText} using a Langevin middle integrator in which the forces were ")
+        methods.write("scaled according to the boost potential. The boost potentials were recorded for every saved frame, ")
+        methods.write("so that free energy profiles can be recovered by reweighting (second-order cumulant expansion). ")
+        methods.write("As with metadynamics, GaMD yields free energies, not kinetic rate constants. ")
+
+##########################################################################################
 def write_generic_simulation_methods(methodsFile: FilePath, simulationInfo: dict) -> None:
     """
     Writes methods section generic to all simulations run by drMD
@@ -690,7 +743,10 @@ def write_generic_simulation_methods(methodsFile: FilePath, simulationInfo: dict
             ## LangevinMiddleIntegrator
             methods.write(f"All simulations were performed using the Langevin Middle Integrator [Ref. {cite('langevinMiddleIntegrator')}] ")
             methods.write("which was used to enforce constant temperature conditions in each simulation. ")
-        if "NPT" in simluationTypes:
+        if "GAMD" in simluationTypes:
+            methods.write(f"Gaussian accelerated MD simulations were performed using a custom Langevin middle integrator [Ref. {cite('langevinMiddleIntegrator')}] ")
+            methods.write("implemented with OpenMM's CustomIntegrator. ")
+        if "NPT" in simluationTypes or "GAMD" in simluationTypes:
             ## MonteCarloBarostat
             methods.write("For simulations run under the *isothermal-isobaric* (NpT) ensemble, ")
             methods.write("the Monte-Carlo barostat was used to enforce a constant pressure of 1 atm. ")
@@ -758,6 +814,7 @@ def cite(key: str) -> str:
         "ambertools" :["10.1021/acs.jcim.3c01153"],
         ## simulation step citations
         "langevinMiddleIntegrator": ["10.1021/acs.jpca.9b02771"],
+        "gamd": ["10.1021/acs.jctc.5b00436"],
         "heavyProtons": ["10.1002/(SICI)1096-987X(199906)20:8<786::AID-JCC5>3.0.CO;2-B"],
         "shake": ["10.1002/1096-987X(20010415)22:5<501::AID-JCC1021>3.0.CO;2-V"],
         "settle": ["10.1002/jcc.540130805"],

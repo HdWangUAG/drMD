@@ -359,7 +359,12 @@ def load_simulation_state(simulation: app.Simulation, saveFile: FilePath) -> app
         simulation.loadCheckpoint(saveFile)
     # Load the simulation state from an XML file
     elif saveFileExt == ".xml":
-        simulation.loadState(saveFile)
+        try:
+            simulation.loadState(saveFile)
+        except openmm.OpenMMException:
+            ## the XML was written by a different integrator type (e.g. a GaMD CustomIntegrator vs
+            ## a LangevinMiddleIntegrator), whose parameters cannot be transferred. Load everything else.
+            load_state_without_integrator(simulation, saveFile)
 
     ## reset time and step count of simulation to zero
     simulation.context.setTime(0.0)
@@ -367,6 +372,28 @@ def load_simulation_state(simulation: app.Simulation, saveFile: FilePath) -> app
 
     # Return the modified simulation object
     return simulation
+###########################################################################################
+def load_state_without_integrator(simulation: app.Simulation, saveXml: FilePath) -> None:
+    """
+    Loads positions, velocities, box vectors, time and any shared global parameters from a state
+    XML file, skipping the integrator parameters. Used when the XML was written with a different
+    integrator type from the one attached to this simulation.
+
+    Args:
+        simulation (app.Simulation): The simulation object.
+        saveXml (str): The path to the XML file.
+    """
+    with open(saveXml, "r") as f:
+        state: openmm.State = openmm.XmlSerializer.deserialize(f.read())
+    context: openmm.Context = simulation.context
+    context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+    context.setPositions(state.getPositions())
+    context.setVelocities(state.getVelocities())
+    context.setTime(state.getTime())
+    contextParameters: dict = context.getParameters()
+    for name, value in state.getParameters().items():
+        if name in contextParameters:
+            context.setParameter(name, value)
 ###########################################################################################
 @drLogger.monitor_progress_decorator()
 # @drFirstAid.firstAid_handler()

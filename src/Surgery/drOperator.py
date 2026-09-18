@@ -8,7 +8,7 @@ import openmm.app as app
 import openmm as openmm
 
 ## drMD LIBRARIES
-from Surgery import drPrep, drSim, drMeta, drFirstAid
+from Surgery import drPrep, drSim, drMeta, drGaMD, drFirstAid
 from Triage import drConfigTriage
 from ExaminationRoom import drLogger
 
@@ -166,6 +166,10 @@ def choose_simulation_function(simulationType: str) -> Callable:
         return drSim.run_molecular_dynamics
     elif simulationType.upper() == "META":
         return drMeta.run_metadynamics
+    elif simulationType.upper() == "GAMD":
+        return drGaMD.run_gamd
+    else:
+        raise ValueError(f"Unknown simulationType {simulationType}, must be one of EM, NVT, NPT, META, GAMD")
 ###########################################################################################
 def skip_resume_or_simulate(simDir: str, simulations: list, i: int, outDir: str) -> tuple:
     """

@@ -411,6 +411,11 @@ def check_simulationInfo(config: dict) -> Tuple[dict, bool]:
         elif simulationWithDefaults["simulationType"] == "EM":
             disorders, emOptionsOk, simulationWithDefaults = check_em_options(simulationWithDefaults, disorders)
             allStepsOk *= emOptionsOk
+        elif simulationWithDefaults["simulationType"] == "GAMD":
+            disorders, mdOptionsOk, simulationWithDefaults  = check_nvt_npt_options(simulationWithDefaults, stepName, disorders)
+            allStepsOk *= mdOptionsOk
+            disorders, gamdOptionsOk, simulationWithDefaults = check_gamd_options(simulationWithDefaults, disorders)
+            allStepsOk *= gamdOptionsOk
 
         restraintsInfo = simulation.get("restraintInfo", None)
         if restraintsInfo:
@@ -422,6 +427,12 @@ def check_simulationInfo(config: dict) -> Tuple[dict, bool]:
 
         ## update config dict to use defaults
         config["simulationInfo"][counter] = simulationWithDefaults
+
+    ## GaMD stages must be consistent with each other
+    gamdStepsDisorders, gamdStepsOk = check_gamd_step_sequence(config["simulationInfo"])
+    if gamdStepsDisorders is not None:
+        simulationInfoDisorders["GAMD_steps"] = gamdStepsDisorders
+    simulationInfoOk *= gamdStepsOk
 
     return config, simulationInfoDisorders, simulationInfoOk
 
@@ -933,6 +944,121 @@ def check_metadynamics_options(simulation: dict, disorders: dict) -> Tuple[dict,
 
     return disorders, metaOptionsOk
 #########################################################################
+def check_gamd_options(simulation: dict, disorders: dict) -> Tuple[dict, bool, dict]:
+    """
+    Checks the gamdInfo dictionary of a GAMD step and fills in defaults.
+    """
+    gamdOptionsOk = True
+    gamdInfo = simulation.get("gamdInfo", None)
+    if gamdInfo is None:
+        disorders["gamdInfo"] = "No gamdInfo found in step with simulationType of GAMD"
+        return disorders, False, simulation
+    if not isinstance(gamdInfo, dict):
+        disorders["gamdInfo"] = "gamdInfo must be a dictionary"
+        return disorders, False, simulation
+    disorders["gamdInfo"] = {}
+
+    ## GaMD steps run at a single temperature (the integrator has no temperature ramp)
+    if "temperatureRange" in simulation and simulation["temperatureRange"] is not None:
+        disorders["gamdInfo"]["temperatureRange"] = "GAMD steps must use temperature, not temperatureRange"
+        gamdOptionsOk = False
+
+    ## stage (required)
+    stage = gamdInfo.get("stage", None)
+    if stage is None:
+        disorders["gamdInfo"]["stage"] = "No stage specified in gamdInfo, must be 'cmd_stats', 'gamd_equil' or 'gamd_prod'"
+        gamdOptionsOk = False
+    elif not isinstance(stage, str) or stage.lower() not in ["cmd_stats", "gamd_equil", "gamd_prod"]:
+        disorders["gamdInfo"]["stage"] = "stage must be 'cmd_stats', 'gamd_equil' or 'gamd_prod'"
+        gamdOptionsOk = False
+    else:
+        gamdInfo["stage"] = stage.lower()
+        disorders["gamdInfo"]["stage"] = None
+
+    ## string options with defaults
+    stringOptions = {"boostType": (["total", "dihedral", "dual"], "dual"),
+                     "thresholdMode": (["lower", "upper"], "lower"),
+                     "ensemble": (["NPT", "NVT"], "NPT")}
+    for optionName, (allowedValues, defaultValue) in stringOptions.items():
+        optionValue = gamdInfo.get(optionName, None)
+        if optionValue is None:
+            gamdInfo[optionName] = defaultValue
+            disorders["gamdInfo"][optionName] = f"No {optionName} specified in gamdInfo, using default of {defaultValue}"
+        elif not isinstance(optionValue, str) or optionValue.lower() not in [value.lower() for value in allowedValues]:
+            disorders["gamdInfo"][optionName] = f"{optionName} must be one of {allowedValues}"
+            gamdOptionsOk = False
+        else:
+            ## normalise case to the allowed spelling
+            gamdInfo[optionName] = [value for value in allowedValues if value.lower() == optionValue.lower()][0]
+            disorders["gamdInfo"][optionName] = None
+
+    ## positive numbers with defaults
+    numberOptions = {"sigma0P": ((int, float), 6.0), "sigma0D": ((int, float), 6.0), "updateInterval": (int, 500)}
+    for optionName, (allowedTypes, defaultValue) in numberOptions.items():
+        optionValue = gamdInfo.get(optionName, None)
+        if optionValue is None:
+            gamdInfo[optionName] = defaultValue
+            disorders["gamdInfo"][optionName] = f"No {optionName} specified in gamdInfo, using default of {defaultValue}"
+        elif not isinstance(optionValue, allowedTypes) or isinstance(optionValue, bool) or optionValue <= 0:
+            disorders["gamdInfo"][optionName] = f"{optionName} must be a positive number"
+            gamdOptionsOk = False
+        else:
+            disorders["gamdInfo"][optionName] = None
+
+    ## excludeRestraintsFromBoost
+    excludeRestraints = gamdInfo.get("excludeRestraintsFromBoost", None)
+    if excludeRestraints is None:
+        gamdInfo["excludeRestraintsFromBoost"] = True
+        disorders["gamdInfo"]["excludeRestraintsFromBoost"] = "No excludeRestraintsFromBoost specified in gamdInfo, using default of True"
+    elif not isinstance(excludeRestraints, bool):
+        disorders["gamdInfo"]["excludeRestraintsFromBoost"] = "excludeRestraintsFromBoost must be a boolean"
+        gamdOptionsOk = False
+    else:
+        disorders["gamdInfo"]["excludeRestraintsFromBoost"] = None
+
+    ## optional collective variables to monitor (same syntax as metaDynamicsInfo biases, without min/max/width)
+    cvs = gamdInfo.get("cvs", None)
+    if cvs is None:
+        gamdInfo["cvs"] = []
+        disorders["gamdInfo"]["cvs"] = None
+    elif not isinstance(cvs, list):
+        disorders["gamdInfo"]["cvs"] = "cvs must be a list of collective variable dictionaries (check README for more details)"
+        gamdOptionsOk = False
+    else:
+        disorders["gamdInfo"]["cvs"] = {}
+        for cvCount, cv in enumerate(cvs):
+            cvDisorders = check_bias_variable(cv, requireGrid=False)
+            disorders["gamdInfo"]["cvs"][f"cv_{cvCount}"] = cvDisorders if len(cvDisorders) > 0 else None
+            if len(cvDisorders) > 0:
+                gamdOptionsOk = False
+
+    simulation["gamdInfo"] = gamdInfo
+    return disorders, gamdOptionsOk, simulation
+#########################################################################
+def check_gamd_step_sequence(simulationInfo: list) -> Tuple[Union[dict, None], bool]:
+    """
+    GaMD stages are consecutive config steps that hand statistics and boost parameters to each other,
+    so they must agree on the options that define the boost and the ensemble.
+    """
+    gamdSteps = [simulation for simulation in simulationInfo
+                 if isinstance(simulation, dict) and str(simulation.get("simulationType", "")).upper() == "GAMD"
+                 and isinstance(simulation.get("gamdInfo", None), dict)]
+    if len(gamdSteps) == 0:
+        return None, True
+    disorders = {}
+    sequenceOk = True
+    ## the first GAMD step must collect statistics
+    if gamdSteps[0]["gamdInfo"].get("stage") != "cmd_stats":
+        disorders["firstStage"] = f"The first GAMD step ({gamdSteps[0]['stepName']}) must have stage 'cmd_stats'"
+        sequenceOk = False
+    ## boost definition and ensemble must not change between stages
+    for optionName in ["boostType", "thresholdMode", "sigma0P", "sigma0D", "ensemble", "excludeRestraintsFromBoost"]:
+        values = {str(step["gamdInfo"].get(optionName)) for step in gamdSteps}
+        if len(values) > 1:
+            disorders[optionName] = f"{optionName} must be the same in every GAMD step, found {sorted(values)}"
+            sequenceOk = False
+    return (disorders if len(disorders) > 0 else None), sequenceOk
+#########################################################################
 def check_bias_variable(bias: dict, requireGrid: bool = True) -> list:
     """
     Checks one bias variable (metadynamics) or collective variable (GaMD monitoring) dictionary.
@@ -1076,8 +1202,8 @@ def check_shared_simulation_options(simulation: dict, disorders: dict) -> Tuple[
     if simulationType is None:
         simulation["simulationType"] = "NPT"
         disorders["simulationType"] = "No simulationType specified in simulation, using NPT as default"
-    elif not simulationType.upper() in ["EM", "NVT", "NPT", "META"]:
-        disorders["simulationType"] = "simulationType in simulation must be one of the following: 'EM', 'NVT', 'NPT', 'META'"
+    elif not simulationType.upper() in ["EM", "NVT", "NPT", "META", "GAMD"]:
+        disorders["simulationType"] = "simulationType in simulation must be one of the following: 'EM', 'NVT', 'NPT', 'META', 'GAMD'"
         sharedOptionsOk = False
     else:
         disorders["simulationType"] = None
