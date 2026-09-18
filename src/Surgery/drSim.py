@@ -24,26 +24,76 @@ from typing import Optional, Dict, List, Tuple, Union, Any
 from UtilitiesCloset.drCustomClasses import FilePath, DirectoryPath
 
 ###########################################################################################
-def initialise_simulation(prmtop: app.AmberPrmtopFile,
-                           inpcrd: app.AmberInpcrdFile,
-                             sim: Dict,
-                               saveFile: FilePath,
-                                 refPdb: FilePath,
-                                   platform: str,
-                                     hardwareInfo: Dict) -> openmm.System:
+def uses_barostat(sim: Dict) -> bool:
     """
-    Create an openmm.System from a prmtop.
+    Decides whether a simulation step runs at constant pressure.
+    NPT and META steps always do; GAMD steps do when gamdInfo["ensemble"] is "NPT" (the default),
+    so that all three GaMD stages are run in the same ensemble.
 
     Parameters
     ----------
-    prmtop : app.Topology
+    sim : Dict
+        Dictionary containing simulation variables.
+
+    Returns
+    -------
+    bool
+        True if a MonteCarloBarostat should be added to the system.
+    """
+    simulationType: str = sim["simulationType"].upper()
+    if simulationType in ["NPT", "META"]:
+        return True
+    if simulationType == "GAMD":
+        return sim.get("gamdInfo", {}).get("ensemble", "NPT").upper() == "NPT"
+    return False
+###########################################################################################
+def get_initial_temperature(sim: Dict) -> Union[int, unit.Quantity]:
+    """
+    Use static temperature if specified, or use first value in temperatureRange to start with
+
+    Parameters
+    ----------
+    sim : Dict
+        Dictionary containing simulation variables.
+
+    Returns
+    -------
+    initialSimulationTemp : Union[int, unit.Quantity]
+        The temperature the simulation starts at.
+    """
+    if "temperature" in sim:
+        return sim["temperature"]
+    elif "temperatureRange" in sim:
+        return sim["temperatureRange"][0]
+###########################################################################################
+def build_system(prmtop: app.AmberPrmtopFile,
+                  inpcrd: app.AmberInpcrdFile,
+                    sim: Dict,
+                      saveFile: FilePath,
+                        refPdb: FilePath) -> openmm.System:
+    """
+    Create an openmm.System from a prmtop.
+    Handles heavy protons, restraints (via drRestraints) and the barostat for
+    constant-pressure steps. This is the single place where drMD builds a System,
+    used by drSim, drMeta and drGaMD.
+
+    Parameters
+    ----------
+    prmtop : app.AmberPrmtopFile
         The topology of the system.
+    inpcrd : app.AmberInpcrdFile
+        The coordinates of the system.
+    sim : Dict
+        Dictionary containing simulation variables (must have been through process_sim_data).
+    saveFile : FilePath
+        The path to the checkpoint or XML file of the previous step (or None).
+    refPdb : FilePath
+        The path to the reference PDB file (used for restraint selections).
 
     Returns
     -------
     system : openmm.System
         The initialized system.
-
     """
 
     # Define the nonbonded method and cutoff.
@@ -70,34 +120,92 @@ def initialise_simulation(prmtop: app.AmberPrmtopFile,
                                                 constraints=app.HBonds,
                                                 hydrogenMass=protonMass)
     
-    ## use static temperature if specified, or use first value in temperatureRange to start with
-    if "temperature" in sim:
-        initailSimulationTemp = sim["temperature"]
-    elif "temperatureRange" in sim:
-        initailSimulationTemp = sim["temperatureRange"][0]
+    initailSimulationTemp = get_initial_temperature(sim)
 
     ## deal with any restraints
     system: openmm.System = drRestraints.restraints_handler(system, prmtop, inpcrd, sim, saveFile, refPdb)
     # add constant pressure force to system (makes this an NpT simulation)    
-    if sim["simulationType"].upper() in ["NPT","META"]:
-        if "temperature" in sim:
-            system.addForce(openmm.MonteCarloBarostat(1*unit.bar, initailSimulationTemp))
-        elif "temperatureRange" in sim:
-            system.addForce(openmm.MonteCarloBarostat(1*unit.bar, initailSimulationTemp))
+    if uses_barostat(sim):
+        system.addForce(openmm.MonteCarloBarostat(1*unit.bar, initailSimulationTemp))
+
+    return system
+###########################################################################################
+def build_simulation(prmtop: app.AmberPrmtopFile,
+                      system: openmm.System,
+                        sim: Dict,
+                          platform: Optional[openmm.Platform] = None,
+                            integrator: Optional[openmm.Integrator] = None) -> Tuple[app.Simulation, openmm.Integrator]:
+    """
+    Create an app.Simulation (and its integrator) for a System built by build_system.
+    By default a LangevinMiddleIntegrator is used; drGaMD passes its own CustomIntegrator.
+
+    Parameters
+    ----------
+    prmtop : app.AmberPrmtopFile
+        The topology of the system.
+    system : openmm.System
+        The system, as returned by build_system.
+    sim : Dict
+        Dictionary containing simulation variables (must have been through process_sim_data).
+    platform : openmm.Platform, optional
+        The platform to run on. If None, OpenMM chooses the fastest available platform.
+    integrator : openmm.Integrator, optional
+        An integrator to use instead of the default LangevinMiddleIntegrator.
+
+    Returns
+    -------
+    simulation : app.Simulation
+        The simulation object.
+    integrator : openmm.Integrator
+        The integrator attached to the simulation.
+    """
+    initailSimulationTemp = get_initial_temperature(sim)
 
     ## setup an intergrator
-    if sim["simulationType"].upper() == "EM":
-        integrator: openmm.Integrator = openmm.LangevinMiddleIntegrator(initailSimulationTemp,
-                                                                  1/unit.picosecond,
-                                                                  4*unit.femtosecond)
+    if integrator is None:
+        if sim["simulationType"].upper() == "EM":
+            integrator: openmm.Integrator = openmm.LangevinMiddleIntegrator(initailSimulationTemp,
+                                                                      1/unit.picosecond,
+                                                                      4*unit.femtosecond)
+        else:
+            integrator: openmm.Integrator = openmm.LangevinMiddleIntegrator(initailSimulationTemp,
+                                                                             1/unit.picosecond,
+                                                                               sim["timestep"])
+
+    if platform is None:
+        simulation: app.simulation.Simulation = app.simulation.Simulation(prmtop.topology, system, integrator)
     else:
-        integrator: openmm.Integrator = openmm.LangevinMiddleIntegrator(initailSimulationTemp,
-                                                                         1/unit.picosecond,
-                                                                           sim["timestep"])
+        simulation: app.simulation.Simulation = app.simulation.Simulation(prmtop.topology, system, integrator, platform)
 
+    return simulation, integrator
+###########################################################################################
+def initialise_simulation(prmtop: app.AmberPrmtopFile,
+                           inpcrd: app.AmberInpcrdFile,
+                             sim: Dict,
+                               saveFile: FilePath,
+                                 refPdb: FilePath,
+                                   platform: str,
+                                     hardwareInfo: Dict) -> Tuple[app.Simulation, openmm.Integrator]:
+    """
+    Create a System and a Simulation from a prmtop.
+    Thin wrapper around build_system and build_simulation, kept for the existing callers.
+    NB. platform is not passed on to the Simulation here: EM / NVT / NPT steps let OpenMM
+    choose the fastest available platform, as they always have.
 
-    simulation: app.simulation.Simulation = app.simulation.Simulation(prmtop.topology, system, integrator, )
-    
+    Parameters
+    ----------
+    prmtop : app.Topology
+        The topology of the system.
+
+    Returns
+    -------
+    simulation : app.Simulation
+        The initialized simulation.
+    integrator : openmm.Integrator
+        The integrator attached to the simulation.
+    """
+    system: openmm.System = build_system(prmtop, inpcrd, sim, saveFile, refPdb)
+    simulation, integrator = build_simulation(prmtop, system, sim)
 
     return simulation , integrator
 

@@ -11,7 +11,7 @@ import openmm as openmm
 import  openmm.unit  as unit
 
 ## drMD LIBRARIES
-from Surgery import drSim, drRestraints, drFirstAid
+from Surgery import drSim, drFirstAid
 from ExaminationRoom import drLogger, drCheckup
 from UtilitiesCloset import drSelector, drFixer
 
@@ -59,24 +59,9 @@ def run_metadynamics(prmtop: app.Topology,
     os.makedirs(simDir, exist_ok=True)
 
     sim = drSim.process_sim_data(sim)
-    # Define the nonbonded method and cutoff.
-    nonbondedMethod: openmm.NonbondedForce = app.PME
-    nonbondedCutoff: unit.Quantity = 1 * unit.nanometer
+    # Create the system (PME, HBond constraints, heavy protons, restraints and barostat)
+    system: openmm.System = drSim.build_system(prmtop, inpcrd, sim, saveFile, refPdb)
 
-    # Define the restraints.
-    hBondconstraints: openmm.Force = app.HBonds
-
-    # Create the system.
-    system: openmm.System = prmtop.createSystem(nonbondedMethod=nonbondedMethod,
-                                                nonbondedCutoff=nonbondedCutoff,
-                                                constraints=hBondconstraints)
-
-    # Deal with restraints (clear all lurking restraints and constants)
-    system: openmm.System = drRestraints.restraints_handler(system, prmtop, inpcrd, sim, saveFile, refPdb)
-
-    # Add a Monte Carlo Barostat to maintain constant pressure
-    barostat: openmm.MonteCarloBarostat = openmm.MonteCarloBarostat(1.0*unit.atmospheres, sim["temperature"])  # Set pressure and temperature
-    system.addForce(barostat)
     # Read metaDynamicsInfo from sim config
     metaDynamicsInfo: dict = sim["metaDynamicsInfo"]
 
@@ -114,10 +99,8 @@ def run_metadynamics(prmtop: app.Topology,
                                      biasDir=simDir)
     
 
-    # Set up integrator
-    integrator: openmm.LangevinMiddleIntegrator = openmm.LangevinMiddleIntegrator(sim["temperature"], 1/unit.picosecond, sim["timestep"])
-    # Create new simulation
-    simulation: app.Simulation = app.simulation.Simulation(prmtop.topology, system, integrator, platform)
+    # Set up integrator and create new simulation
+    simulation, integrator = drSim.build_simulation(prmtop, system, sim, platform)
     # Load state from previous simulation (or continue from checkpoint)
     simulation: app.Simulation = drSim.load_simulation_state(simulation, saveFile)
     # Set up reporters
