@@ -515,26 +515,26 @@ def selection_to_text(selection: Dict) -> str:
         selectionText = ""
         ## deal with atoms
         atomName = customSelection["ATOM_NAME"]
-        if  atomName == "all":
+        if  atomName in ["all", "_"]:
             selectionText += "all atoms in"
         else:
             selectionText += f"atom{identifier_list_to_str(atomName)}"
 
         ## deal with resId and resName together
-        residueId = customSelection["RES_ID"]
-        residueName = customSelection["RES_NAME"]
+        residueId = "all" if customSelection["RES_ID"] == "_" else customSelection["RES_ID"]
+        residueName = "all" if customSelection["RES_NAME"] == "_" else customSelection["RES_NAME"]
         if not residueId == "all" and not residueName == "all":
-            if isinstance(residueId, str) and isinstance(residueName, str):
+            if isinstance(residueId, (str, int)) and isinstance(residueName, str):
                 selectionText += f" in residue {residueName}{residueId}"
             else:
-                selectionText += f" in residue {identifier_list_to_str(residueId)}{identifier_list_to_str(residueName)}"
+                selectionText += f" in residue{identifier_list_to_str(residueName)}{identifier_list_to_str(residueId)}"
         elif not residueId == "all":
-            selectionText += f" in residue {identifier_list_to_str(residueId)}"
+            selectionText += f" in residue{identifier_list_to_str(residueId)}"
         elif not residueName == "all":
-            selectionText += f" in residue {identifier_list_to_str(residueName)}"
+            selectionText += f" in residue{identifier_list_to_str(residueName)}"
         ## deal with chain
         chainId = customSelection["CHAIN_ID"]
-        if not chainId == "all":
+        if not chainId in ["all", "_"]:
             selectionText += f" in chain{identifier_list_to_str(chainId)}"
 
         selectionTexts.append(selectionText)
@@ -579,10 +579,10 @@ def identifier_list_to_str(identifier: Union[str, list]) -> str:
     Returns:
         text: (str) methods text for the identifier
     """
-    if isinstance(identifier, str):
-        return " " + identifier
+    if isinstance(identifier, (str, int)):
+        return f" {identifier}"
     else:
-        return f"s {format_list(identifier)}"
+        return f"s {format_list([str(item) for item in identifier])}"
 
 ##########################################################################################
 def write_per_step_simulation_methods(methodsFile: FilePath, sim: dict, stepIndex: int, maxSteps: int) -> None:
@@ -661,12 +661,12 @@ def write_metadynamics_simulation_methods(methodsFile: FilePath, sim: dict) -> N
         methods.write(f"This metadynamics simulation was performed using the well-tempered metadynamics method [Ref. {cite('metadynamics')}]. ")
         methods.write(f"This simulation was performed using a height parameter of {metaDynamicsInfo['height']}, ")
         methods.write(f"a biasFactor parameter of {metaDynamicsInfo['biasFactor']}, ")
-        methods.write(f"a frequency parameter of {metaDynamicsInfo['frequency']}. ")
+        methods.write(f"with Gaussians deposited every {metaDynamicsInfo['frequency']} steps. ")
 
         if len(biases) > 1:
             methods.write(f"The following bias variables were used in this simulation: ")
         for bias in biases:
-            if bias["biasVar"].upper() in ["RMSD", "DISTANCE"]:
+            if bias["biasVar"].upper() in ["RMSD", "DISTANCE", "COM_DISTANCE"]:
                 unit = "Å"
             elif bias["biasVar"].upper() in ["ANGLE", "TORSION"]:
                 unit = "°"
@@ -676,7 +676,11 @@ def write_metadynamics_simulation_methods(methodsFile: FilePath, sim: dict) -> N
             methods.write(f"with a maximum value of {bias['maxValue']} {unit } and ")
             methods.write(f"a minimum value of {bias['minValue']} {unit}. ")
             methods.write(f"Gaussians with a width parameter of {bias['biasWidth']} {unit} were used to perturb the bias variable. ")
-            methods.write(f"This bias variable was applied to {selection_to_text(biasSelection)}. ")
+            if bias["biasVar"].upper() == "COM_DISTANCE":
+                methods.write(f"This bias variable was the distance between the centre of mass of {selection_to_text(biasSelection)} ")
+                methods.write(f"and the centre of mass of {selection_to_text(bias['selection2'])}. ")
+            else:
+                methods.write(f"This bias variable was applied to {selection_to_text(biasSelection)}. ")
 
 
 
