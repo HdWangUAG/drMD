@@ -916,6 +916,53 @@ def check_metadynamics_options(simulation: dict, disorders: dict) -> Tuple[dict,
         else:
             disorders["metaDynamicsInfo"]["biasFactor"] = None
     
+    ## check frequency (steps between Gaussian depositions), default 500 (1 ps at 2 fs)
+    frequency = metaDynamicsInfo.get("frequency", None)
+    if frequency is None:
+        metaDynamicsInfo["frequency"] = 500
+        disorders["metaDynamicsInfo"]["frequency"] = "No frequency specified in metaDynamicsInfo, using default of 500 steps"
+    elif not isinstance(frequency, int) or isinstance(frequency, bool) or frequency <= 0:
+        disorders["metaDynamicsInfo"]["frequency"] = "frequency must be a positive integer number of steps"
+        metaOptionsOk = False
+    else:
+        disorders["metaDynamicsInfo"]["frequency"] = None
+
+    ## check saveFrequency (steps between bias writes to disk), default = frequency, must be a multiple of it
+    saveFrequency = metaDynamicsInfo.get("saveFrequency", None)
+    if saveFrequency is None:
+        metaDynamicsInfo["saveFrequency"] = metaDynamicsInfo["frequency"] if isinstance(metaDynamicsInfo.get("frequency"), int) else None
+        disorders["metaDynamicsInfo"]["saveFrequency"] = "No saveFrequency specified in metaDynamicsInfo, using default of frequency"
+    elif not isinstance(saveFrequency, int) or isinstance(saveFrequency, bool) or saveFrequency <= 0:
+        disorders["metaDynamicsInfo"]["saveFrequency"] = "saveFrequency must be a positive integer number of steps"
+        metaOptionsOk = False
+    elif isinstance(metaDynamicsInfo.get("frequency"), int) and saveFrequency % metaDynamicsInfo["frequency"] != 0:
+        disorders["metaDynamicsInfo"]["saveFrequency"] = "saveFrequency must be a multiple of frequency"
+        metaOptionsOk = False
+    else:
+        disorders["metaDynamicsInfo"]["saveFrequency"] = None
+
+    ## check biasDir (optional, shared between walkers)
+    biasDir = metaDynamicsInfo.get("biasDir", None)
+    if biasDir is None:
+        disorders["metaDynamicsInfo"]["biasDir"] = None
+    elif not isinstance(biasDir, str):
+        disorders["metaDynamicsInfo"]["biasDir"] = "biasDir must be a path (string)"
+        metaOptionsOk = False
+    else:
+        disorders["metaDynamicsInfo"]["biasDir"] = None
+
+    ## check freeEnergyInterval (optional time string, e.g. "1 ns")
+    freeEnergyInterval = metaDynamicsInfo.get("freeEnergyInterval", None)
+    if freeEnergyInterval is None:
+        disorders["metaDynamicsInfo"]["freeEnergyInterval"] = None
+    else:
+        timeCheckProblems = check_time_input(freeEnergyInterval, "freeEnergyInterval", simulation.get("stepName", ""))
+        if timeCheckProblems is not None:
+            disorders["metaDynamicsInfo"]["freeEnergyInterval"] = timeCheckProblems
+            metaOptionsOk = False
+        else:
+            disorders["metaDynamicsInfo"]["freeEnergyInterval"] = None
+
     ## check biases parameter
     biases = metaDynamicsInfo.get("biases", None)
     ## make sure biases is present in metaDynamicsInfo

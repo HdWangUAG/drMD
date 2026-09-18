@@ -1,8 +1,8 @@
 ## BASIC PYTHON LIBRARIES
 import os
 from os import path as p
+import re
 import numpy as np
-import pandas as pd
 
 ## OPENMM LIBRARIES
 import openmm.app as app
@@ -13,6 +13,7 @@ import  openmm.unit  as unit
 ## drMD LIBRARIES
 from Surgery import drSim, drFirstAid
 from ExaminationRoom import drLogger, drCheckup
+from ExaminationRoom.drCVReporter import CVReporter, CV_UNITS
 from UtilitiesCloset import drSelector, drFixer
 
 ########################################################################################################
@@ -75,16 +76,27 @@ def run_metadynamics(prmtop: app.Topology,
         biasVariable: metadynamics.BiasVariable = gen_bias_variable(bias, atomCoords, refPdb)
         biasVariables.append(biasVariable)
 
+    ## Gaussian deposition frequency (steps), how often the bias is written to disk (steps), and where.
+    ## A shared biasDir lets several drMD runs act as multiple walkers on one bias.
+    frequency: int = metaDynamicsInfo["frequency"]
+    saveFrequency: int = metaDynamicsInfo["saveFrequency"]
+    biasDir: str = metaDynamicsInfo.get("biasDir", None) or simDir
+    os.makedirs(biasDir, exist_ok=True)
+    if frequency < 200:
+        drLogger.log_info(f"WARNING: metadynamics frequency of {frequency} steps deposits Gaussians much faster than "
+                          f"usual practice (1-4 ps, i.e. 500-2000 steps at 2 fs); the bias will over-fill early", True, True)
+
     # Create metadynamics object and add bias variables as forces to the system
     meta: metadynamics.Metadynamics = metadynamics.Metadynamics(system=system,
                                      variables=biasVariables,
                                      temperature=sim["temperature"],
                                      biasFactor=metaDynamicsInfo["biasFactor"],
                                      height=metaDynamicsInfo["height"],
-                                     frequency=50,
-                                     saveFrequency=50,
-                                     biasDir=simDir)
-    
+                                     frequency=frequency,
+                                     saveFrequency=saveFrequency,
+                                     biasDir=biasDir)
+    ## the bias force is the CustomCVForce that Metadynamics just appended to the system
+    biasForce: openmm.CustomCVForce = system.getForce(system.getNumForces() - 1)
 
     # Set up integrator and create new simulation
     simulation, integrator = drSim.build_simulation(prmtop, system, sim, platform)
@@ -99,8 +111,25 @@ def run_metadynamics(prmtop: app.Topology,
                                 simulation=simulation,
                                 dcdAtomSelections= config["miscInfo"]["trajectorySelections"],
                                 refPdb=refPdb)
-    # Run metadynamics simulation
-    meta.step(simulation, sim["nSteps"])
+    ## record the collective variables and bias energy every logInterval (cv.csv)
+    ## on a resume the step counter restarts at 0, so continue from the time of the last block written
+    stepOffset: int = get_resume_step_offset(simDir, sim["timestep"])
+    timeOffset: float = stepOffset * sim["timestep"].value_in_unit(unit.picoseconds)
+    cvUnits: list = [CV_UNITS[bias["biasVar"].upper()] for bias in biases]
+    simulation.reporters.append(CVReporter(p.join(simDir, "cv.csv"), reportInterval, biasForce, cvUnits,
+                                           biasForceGroup=biasForce.getForceGroup(),
+                                           stepOffset=stepOffset, timeOffset=timeOffset))
+
+    # Run metadynamics simulation in blocks, dumping the free energy surface after each block
+    # (freeEnergy_<t>ns.csv) so that convergence of the FES with time can be inspected
+    blockSteps: int = get_free_energy_block_steps(sim, metaDynamicsInfo)
+    stepsDone: int = 0
+    while stepsDone < sim["nSteps"]:
+        chunk: int = min(blockSteps, sim["nSteps"] - stepsDone)
+        meta.step(simulation, chunk)
+        stepsDone += chunk
+        timeNs: float = (stepOffset + stepsDone) * sim["timestep"].value_in_unit(unit.nanoseconds)
+        write_free_energy(meta, p.join(simDir, f"freeEnergy_{timeNs:.3f}ns.csv"))
  
     # find name to call outFiles
     protName: str = p.basename(p.dirname(simDir))
@@ -121,12 +150,45 @@ def run_metadynamics(prmtop: app.Topology,
     simulation.saveState(saveXml)
 
     ## get free energy and write to csv
-    metadynamicsFreeEnergy = meta.getFreeEnergy()
-    freeEnergyCsv = p.join(simDir, "freeEnergy.csv")
-    np.savetxt(freeEnergyCsv, metadynamicsFreeEnergy, delimiter=",", header="Bias Variable Free Energy")
+    write_free_energy(meta, p.join(simDir, "freeEnergy.csv"))
 
     # Return checkpoint file for continuing simulation
     return saveXml
+########################################################################################################
+def write_free_energy(meta: metadynamics.Metadynamics, freeEnergyCsv: str) -> None:
+    """
+    Writes meta.getFreeEnergy() (kJ/mol, one row per grid point of the last bias variable) to a CSV file.
+    Three-dimensional surfaces are flattened along their leading axes.
+    """
+    metadynamicsFreeEnergy = meta.getFreeEnergy().value_in_unit(unit.kilojoules_per_mole)
+    if metadynamicsFreeEnergy.ndim > 2:
+        metadynamicsFreeEnergy = metadynamicsFreeEnergy.reshape(-1, metadynamicsFreeEnergy.shape[-1])
+    np.savetxt(freeEnergyCsv, metadynamicsFreeEnergy, delimiter=",", header="Bias Variable Free Energy")
+########################################################################################################
+def get_free_energy_block_steps(sim: dict, metaDynamicsInfo: dict) -> int:
+    """
+    Number of steps between free energy surface dumps: metaDynamicsInfo["freeEnergyInterval"] (a time
+    string such as "1 ns") if given, otherwise a tenth of the step's duration.
+    """
+    freeEnergyInterval = metaDynamicsInfo.get("freeEnergyInterval", None)
+    if freeEnergyInterval is None:
+        return max(1, sim["nSteps"] // 10)
+    timescale: dict = {"fs": unit.femtoseconds, "ps": unit.picoseconds, "ns": unit.nanoseconds}
+    value, timeUnit = freeEnergyInterval.split()
+    interval: unit.Quantity = float(value) * timescale[timeUnit]
+    return max(1, int(round(interval / sim["timestep"])))
+########################################################################################################
+def get_resume_step_offset(simDir: str, timestep: unit.Quantity) -> int:
+    """
+    If this step was resumed, earlier segments have left freeEnergy_<t>ns.csv files behind. The largest
+    <t> gives the simulation time already covered, so later blocks and cv.csv rows continue from it.
+    """
+    latestNs: float = 0.0
+    for fileName in os.listdir(simDir):
+        match = re.match(r"freeEnergy_([0-9.]+)ns\.csv$", fileName)
+        if match is not None:
+            latestNs = max(latestNs, float(match.group(1)))
+    return int(round(latestNs / timestep.value_in_unit(unit.nanoseconds)))
 ########################################################################################################
 ########################################################################################################
 def get_atom_coords_for_metadynamics(prmtop: app.Topology, inpcrd: any) -> list:
