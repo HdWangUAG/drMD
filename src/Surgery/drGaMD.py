@@ -113,6 +113,9 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
         drLogger.log_info(f"Resuming {stepName} from {stepName}_gamd.json: {nStepsDone} steps already done, {nStepsToRun} to go", True)
     apply_state_to_integrator(integrator, gamdState)
     log_boost_parameters(gamdState, stage)
+    ## gamd_parameters.csv records the statistics and parameters at every update, so their convergence can be checked
+    parametersCsv: FilePath = p.join(simDir, "gamd_parameters.csv")
+    write_parameters_row(parametersCsv, nStepsDone, gamdState)
     updateInterval: int = gamdInfo["updateInterval"]
     if stage == "gamd_equil":
         if not is_checkpoint_resume(saveFile, simDir):
@@ -161,6 +164,7 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
             gamdState = update_boost_parameters(gamdState, gamdInfo)
             apply_parameters_to_integrator(integrator, gamdState)
             reset_window_statistics(integrator)
+            write_parameters_row(parametersCsv, nStepsDone, gamdState)
     gamdState = read_statistics_from_integrator(integrator, gamdState)
     gamdState["stepsCompleted"] = nStepsDone
     write_gamd_json(gamdJson, gamdState)
@@ -171,6 +175,8 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
         gamdState = update_boost_parameters(gamdState, gamdInfo)
         write_gamd_json(gamdJson, gamdState)
     log_boost_parameters(gamdState, f"{stage} (final)")
+    if stage != "gamd_equil":
+        write_parameters_row(parametersCsv, nStepsDone, gamdState)
 
     # save result as pdb - reset chain and residue Ids
     endPointPdb: FilePath = p.join(simDir, f"{protName}.pdb")
@@ -531,6 +537,26 @@ def write_gamd_json(gamdJson: FilePath, gamdState: Dict) -> None:
 def read_gamd_json(gamdJson: FilePath) -> Dict:
     with open(gamdJson, "r") as f:
         return json.load(f)
+########################################################################################################
+def write_parameters_row(parametersCsv: FilePath, step: int, gamdState: Dict) -> None:
+    """
+    Appends one row of statistics and boost parameters (kcal/mol) to gamd_parameters.csv.
+    Columns: step, then for each channel (P, D): count, Vmax, Vmin, Vavg, sigmaV, k0, k, E, threshold.
+    """
+    writeHeader: bool = not (p.isfile(parametersCsv) and os.path.getsize(parametersCsv) > 0)
+    with open(parametersCsv, "a") as f:
+        if writeHeader:
+            columns: List[str] = ["step"]
+            for channel in BOOST_CHANNELS:
+                columns += [f"{name}_{channel}" for name in ["count", "Vmax", "Vmin", "Vavg", "sigmaV", "k0", "k", "E", "threshold"]]
+            f.write(",".join(columns) + "\n")
+        row: List[str] = [str(step)]
+        for channel in BOOST_CHANNELS:
+            stats: Dict = gamdState["statistics"][channel]
+            params: Dict = gamdState["parameters"][channel]
+            row += [str(stats["count"])] + [f"{stats[name]:.4f}" for name in ["Vmax", "Vmin", "Vavg", "sigmaV"]]
+            row += [f"{params['k0']:.6f}", f"{params['k']:.8f}", f"{params['E']:.4f}", params["thresholdModeUsed"]]
+        f.write(",".join(row) + "\n")
 ########################################################################################################
 def log_boost_parameters(gamdState: Dict, label: str) -> None:
     for channel, name in zip(BOOST_CHANNELS, ["total", "dihedral"]):

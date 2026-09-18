@@ -954,6 +954,8 @@ In each `GAMD` step directory:
 - `<stepName>_gamd.json`: the potential energy statistics (`Vmax`, `Vmin`, `Vavg`, `sigmaV`, in kcal/mol) and the boost parameters (`k0`, `k`, `E`, threshold
   actually used) for the total (`P`) and dihedral (`D`) boosts, plus the number of steps completed. Compare `Vavg` between `cmd_stats` and `gamd_equil`:
   they should agree.
+- `gamd_parameters.csv`: the statistics and boost parameters at every update (one row per **updateInterval** during `gamd_equil`), so you can
+  see `k0` and `E` settle before production. Moved to `00_reporters_and_plots` after the step.
 - `cv.csv`: the collective variables from **cvs**, if any (moved to `00_reporters_and_plots`).
 - the usual `vitals_report.csv`, trajectory, checkpoint and state files.
 
