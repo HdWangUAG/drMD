@@ -42,7 +42,7 @@ def test_gamd_defaults_and_sequence():
     assert cfg is not None
     info = cfg["simulationInfo"][0]["gamdInfo"]
     assert info == {"stage": "cmd_stats", "boostType": "dual", "thresholdMode": "lower", "ensemble": "NPT",
-                    "sigma0P": 6.0, "sigma0D": 6.0, "updateInterval": 500, "excludeRestraintsFromBoost": True, "cvs": []}, info
+                    "sigma0P": 6.0, "sigma0D": 6.0, "updateInterval": 50000, "excludeRestraintsFromBoost": True, "cvs": []}, info
     print("GAMD defaults OK:", info)
 
 

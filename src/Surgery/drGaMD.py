@@ -54,8 +54,11 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
     the statistics (Vmax, Vmin, Vavg, sigmaV) of the potential energy, so a GaMD protocol has three
     stages, each expressed as one drMD simulation step with simulationType "GAMD":
 
-        cmd_stats   conventional MD (no boost), potential energy statistics are collected
-        gamd_equil  boost switched on, boost parameters re-derived every updateInterval steps
+        cmd_stats   conventional MD (no boost), potential energy statistics are collected over the whole stage
+        gamd_equil  boost switched on; every updateInterval steps the boost parameters are re-derived from
+                    the running Vmax / Vmin and the Vavg / sigmaV of the last updateInterval steps (the
+                    AMBER "ntave" scheme: the boosted ensemble's energies replace the cmd ones as they arrive,
+                    so parameters converge instead of mixing two ensembles in one accumulator)
         gamd_prod   boost parameters frozen, this is the stage to analyse
 
     Statistics and boost parameters are persisted in <stepName>_gamd.json in the step directory:
@@ -110,6 +113,14 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
         drLogger.log_info(f"Resuming {stepName} from {stepName}_gamd.json: {nStepsDone} steps already done, {nStepsToRun} to go", True)
     apply_state_to_integrator(integrator, gamdState)
     log_boost_parameters(gamdState, stage)
+    updateInterval: int = gamdInfo["updateInterval"]
+    if stage == "gamd_equil":
+        if not is_checkpoint_resume(saveFile, simDir):
+            ## Vavg / sigmaV are re-estimated from the boosted ensemble one window at a time
+            reset_window_statistics(integrator)
+        if updateInterval * sim["timestep"].value_in_unit(unit.picoseconds) < 20:
+            drLogger.log_info(f"WARNING: updateInterval of {updateInterval} steps is a short window for estimating Vavg and sigmaV; "
+                              f"GaMD boost parameters may fluctuate. 50 000 steps (100 ps at 2 fs) is typical", True, True)
 
     # Set up reporters
     totalSteps: int = simulation.currentStep + nStepsToRun
@@ -138,8 +149,7 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
     simulation.reporters.append(GaMDStateReporter(gamdJson, reportInterval, integrator, gamdState, stepOffset=nStepsDone))
 
     ## run the simulation in chunks of updateInterval steps; during gamd_equil the boost parameters
-    ## are re-derived from the running statistics between chunks
-    updateInterval: int = gamdInfo["updateInterval"]
+    ## are re-derived between chunks from the running Vmax / Vmin and the Vavg / sigmaV of the last chunk
     stepsRemaining: int = nStepsToRun
     while stepsRemaining > 0:
         chunk: int = min(updateInterval, stepsRemaining)
@@ -150,6 +160,7 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
             gamdState = read_statistics_from_integrator(integrator, gamdState)
             gamdState = update_boost_parameters(gamdState, gamdInfo)
             apply_parameters_to_integrator(integrator, gamdState)
+            reset_window_statistics(integrator)
     gamdState = read_statistics_from_integrator(integrator, gamdState)
     gamdState["stepsCompleted"] = nStepsDone
     write_gamd_json(gamdJson, gamdState)
@@ -251,7 +262,8 @@ def make_gamd_integrator(temperature: unit.Quantity,
         kP, EP, kD, ED             boost parameters, k in 1/(kJ/mol). k = 0 switches a boost off.
         VT, VD                     boostable potential energy, dihedral potential energy (current step)
         dVP, dVD                   boost potentials added this step
-        nStats                     number of steps accumulated in the statistics
+        nStats                     number of steps accumulated in the mean / variance statistics
+        seeded                     0 until the first step has initialised Vmax / Vmin, then 1
         VmaxP, VminP, VavgP, M2P   running statistics of VT (M2 = sum of squared deviations)
         VmaxD, VminD, VavgD, M2D   running statistics of VD
 
@@ -282,8 +294,9 @@ def make_gamd_integrator(temperature: unit.Quantity,
     ## per-step energies, boosts and force weights
     for name in ["VT", "VD", "dVP", "dVD", "fwP", "fwD", "deltaP", "deltaD"]:
         integrator.addGlobalVariable(name, 0)
-    ## running statistics
+    ## running statistics; "seeded" is 0 until the first energy has initialised Vmax / Vmin
     integrator.addGlobalVariable("nStats", 0)
+    integrator.addGlobalVariable("seeded", 0)
     for channel in BOOST_CHANNELS:
         for name in ["Vmax", "Vmin", "Vavg", "M2"]:
             integrator.addGlobalVariable(f"{name}{channel}", 0)
@@ -294,14 +307,15 @@ def make_gamd_integrator(temperature: unit.Quantity,
     integrator.addComputeGlobal("VD", f"energy{FORCE_GROUP_DIHEDRAL}")
     integrator.addComputeGlobal("VT", f"energy{FORCE_GROUP_TOTAL}")
     integrator.addComputeGlobal("VT", "VT + VD")
-    ## running statistics (Welford). On the very first accumulated step, max and min are seeded with the energy
+    ## running statistics (Welford). On the very first step, max and min are seeded with the energy
     integrator.addComputeGlobal("nStats", "nStats + 1")
     for channel, energyName in zip(BOOST_CHANNELS, ["VT", "VD"]):
-        integrator.addComputeGlobal(f"Vmax{channel}", f"select(step(nStats - 1.5), max(Vmax{channel}, {energyName}), {energyName})")
-        integrator.addComputeGlobal(f"Vmin{channel}", f"select(step(nStats - 1.5), min(Vmin{channel}, {energyName}), {energyName})")
+        integrator.addComputeGlobal(f"Vmax{channel}", f"select(seeded, max(Vmax{channel}, {energyName}), {energyName})")
+        integrator.addComputeGlobal(f"Vmin{channel}", f"select(seeded, min(Vmin{channel}, {energyName}), {energyName})")
         integrator.addComputeGlobal(f"delta{channel}", f"{energyName} - Vavg{channel}")
         integrator.addComputeGlobal(f"Vavg{channel}", f"Vavg{channel} + delta{channel}/nStats")
         integrator.addComputeGlobal(f"M2{channel}", f"M2{channel} + delta{channel}*({energyName} - Vavg{channel})")
+    integrator.addComputeGlobal("seeded", "1")
     ## boost potentials and the resulting force weights
     integrator.addComputeGlobal("dVP", "0.5*kP*(EP-VT)^2*step(EP-VT)")
     integrator.addComputeGlobal("dVD", "0.5*kD*(ED-VD)^2*step(ED-VD)")
@@ -335,6 +349,7 @@ def new_gamd_state(sim: Dict) -> Dict:
             "boostType": gamdInfo["boostType"],
             "thresholdMode": gamdInfo["thresholdMode"],
             "units": "kcal/mol",
+            "extremesSeeded": False,
             "stepsCompleted": 0,
             "totalSteps": sim["nSteps"],
             "statistics": {channel: {"count": 0, "Vmax": 0.0, "Vmin": 0.0, "Vavg": 0.0, "sigmaV": 0.0}
@@ -397,6 +412,7 @@ def init_gamd_state(sim: Dict,
     previousState: Dict = read_gamd_json(previousJson)
     gamdState: Dict = new_gamd_state(sim)
     gamdState["statistics"] = previousState["statistics"]
+    gamdState["extremesSeeded"] = previousState.get("extremesSeeded", True)
     gamdState["derivedFrom"] = previousJson
     if stage == "gamd_prod" and previousState["stage"] != "cmd_stats":
         ## production freezes the parameters the preceding equilibration (or production replicate) used
@@ -469,6 +485,18 @@ def apply_state_to_integrator(integrator: openmm.CustomIntegrator, gamdState: Di
         integrator.setGlobalVariableByName(f"M2{channel}", stats["count"] * (stats["sigmaV"] * KJ_PER_KCAL) ** 2)
     ## both channels share the same step count
     integrator.setGlobalVariableByName("nStats", gamdState["statistics"]["P"]["count"])
+    integrator.setGlobalVariableByName("seeded", 1 if gamdState.get("extremesSeeded", False) else 0)
+########################################################################################################
+def reset_window_statistics(integrator: openmm.CustomIntegrator) -> None:
+    """
+    Restarts the mean / variance accumulators (Vavg, M2, nStats) so that the next read gives the statistics
+    of the steps run from now on. Vmax and Vmin are kept: they are running extremes over the whole protocol
+    (the "seeded" flag stays set, so they are not re-initialised).
+    """
+    integrator.setGlobalVariableByName("nStats", 0)
+    for channel in BOOST_CHANNELS:
+        integrator.setGlobalVariableByName(f"Vavg{channel}", 0.0)
+        integrator.setGlobalVariableByName(f"M2{channel}", 0.0)
 ########################################################################################################
 def apply_parameters_to_integrator(integrator: openmm.CustomIntegrator, gamdState: Dict) -> None:
     """Loads only the boost parameters (kcal/mol) into the integrator (kJ/mol), leaving the running statistics untouched."""
@@ -482,6 +510,7 @@ def read_statistics_from_integrator(integrator: openmm.CustomIntegrator, gamdSta
     Reads the running statistics accumulated by the integrator (kJ/mol) back into gamdState (kcal/mol).
     """
     count: int = int(round(integrator.getGlobalVariableByName("nStats")))
+    gamdState["extremesSeeded"] = integrator.getGlobalVariableByName("seeded") > 0.5
     for channel in BOOST_CHANNELS:
         M2: float = integrator.getGlobalVariableByName(f"M2{channel}")
         sigmaV: float = math.sqrt(max(M2, 0.0) / count) if count > 0 else 0.0

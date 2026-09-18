@@ -129,6 +129,19 @@ def test_welford_statistics():
     sigma = math.sqrt(integ.getGlobalVariableByName("M2P") / n)
     assert abs(sigma - energies.std()) < 1e-6 * max(1, energies.std())
     print(f"Welford statistics over 200 steps agree with numpy: mean {energies.mean():.3f}, std {energies.std():.3f} kJ/mol")
+    ## a window reset restarts mean / variance but keeps the running extremes
+    drGaMD.reset_window_statistics(integ)
+    assert integ.getGlobalVariableByName("nStats") == 0 and integ.getGlobalVariableByName("VavgP") == 0
+    more = []
+    for _ in range(50):
+        integ.step(1)
+        more.append(integ.getGlobalVariableByName("VT"))
+    more = np.array(more)
+    assert integ.getGlobalVariableByName("nStats") == 50
+    assert abs(integ.getGlobalVariableByName("VavgP") - more.mean()) < 1e-6
+    assert abs(integ.getGlobalVariableByName("VmaxP") - max(energies.max(), more.max())) < 1e-6, "Vmax must survive a window reset"
+    assert abs(integ.getGlobalVariableByName("VminP") - min(energies.min(), more.min())) < 1e-6, "Vmin must survive a window reset"
+    print("window reset keeps Vmax / Vmin and restarts Vavg / sigmaV")
 
 
 def test_boost_parameters():

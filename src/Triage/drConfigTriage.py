@@ -1040,7 +1040,7 @@ def check_gamd_options(simulation: dict, disorders: dict) -> Tuple[dict, bool, d
             disorders["gamdInfo"][optionName] = None
 
     ## positive numbers with defaults
-    numberOptions = {"sigma0P": ((int, float), 6.0), "sigma0D": ((int, float), 6.0), "updateInterval": (int, 500)}
+    numberOptions = {"sigma0P": ((int, float), 6.0), "sigma0D": ((int, float), 6.0), "updateInterval": (int, 50000)}
     for optionName, (allowedTypes, defaultValue) in numberOptions.items():
         optionValue = gamdInfo.get(optionName, None)
         if optionValue is None:

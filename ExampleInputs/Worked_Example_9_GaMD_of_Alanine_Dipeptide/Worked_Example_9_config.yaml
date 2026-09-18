@@ -1,0 +1,145 @@
+#########################################################################
+#       PRESCRIPTION DESCRIPTION:
+#   Gaussian accelerated MD (GaMD) of alanine dipeptide, as a CV-free
+#   counterpart to the metadynamics run of Worked Example 5.
+#
+#     1-4. ENERGY MINIMISATION and EQUILIBRATION as in Worked Example 5
+#          (all at a 2 fs timestep here, so that the conventional-MD reference
+#          and the GaMD stages are directly comparable)
+#     5.  NPT REFERENCE
+#          2 ns of plain NPT MD; compare its vitals with the cmd_stats stage
+#     6.  GaMD STAGE 1: cmd_stats
+#          2 ns of conventional MD collecting Vmax / Vmin / Vavg / sigmaV
+#     7.  GaMD STAGE 2: gamd_equil
+#          6 ns with the dual boost on, boost parameters refreshed every 50 000 steps (100 ps)
+#     8.  GaMD STAGE 3: gamd_prod
+#          30 ns with frozen boost parameters. phi / psi are recorded to cv.csv,
+#          the boosts to gamd.log; reweight with src/ExaminationRoom/drReweight.py
+#
+#   Put two or more copies of alanine_dipeptide.pdb in the input directory
+#   (e.g. ala_rep1.pdb, ala_rep2.pdb) to get independent replicates, and set
+#   parallelCPU to run them side by side on one GPU.
+########################################################################
+pathInfo:
+  inputDir: /home/esp/scriptDevelopment/drMD/ExampleInputs/Worked_Example_9_GaMD_of_Alanine_Dipeptide
+  outputDir: /home/esp/scriptDevelopment/drMD/ExampleInputs/Worked_Example_9_GaMD_of_Alanine_Dipeptide/outputs
+
+########################################################################
+hardwareInfo:
+  parallelCPU: 1
+  platform: CUDA
+  subprocessCpus: 1
+########################################################################
+miscInfo:
+  pH: 7.4
+  firstAidMaxRetries: 10
+  boxGeometry: cubic
+  writeMyMethodsSection: True
+  skipPdbTriage: True
+  trajectorySelections:
+  - selection:
+      keyword: protein
+
+########################################################################
+equilibriationRestraints: &equilibriationRestraints
+    - restraintType: position
+      parameters:
+        k: 1000
+      selection:
+        keyword: protein
+
+########################################################################
+# settings shared by the three GaMD stages (they must not change between stages)
+gamdSettings: &gamdSettings
+  boostType: dual
+  thresholdMode: lower
+  sigma0P: 6.0
+  sigma0D: 6.0
+  updateInterval: 50000
+  excludeRestraintsFromBoost: True
+  ensemble: NPT
+  cvs:
+    - biasVar: torsion          # phi
+      selection:
+        keyword: custom
+        customSelection:
+        - {CHAIN_ID: A, RES_NAME: ACE, RES_ID: 1, ATOM_NAME: C}
+        - {CHAIN_ID: A, RES_NAME: ALA, RES_ID: 2, ATOM_NAME: N}
+        - {CHAIN_ID: A, RES_NAME: ALA, RES_ID: 2, ATOM_NAME: CA}
+        - {CHAIN_ID: A, RES_NAME: ALA, RES_ID: 2, ATOM_NAME: C}
+    - biasVar: torsion          # psi
+      selection:
+        keyword: custom
+        customSelection:
+        - {CHAIN_ID: A, RES_NAME: ALA, RES_ID: 2, ATOM_NAME: N}
+        - {CHAIN_ID: A, RES_NAME: ALA, RES_ID: 2, ATOM_NAME: CA}
+        - {CHAIN_ID: A, RES_NAME: ALA, RES_ID: 2, ATOM_NAME: C}
+        - {CHAIN_ID: A, RES_NAME: NME, RES_ID: 3, ATOM_NAME: N}
+
+########################################################################
+simulationInfo:
+  - stepName: 01_energy_minimisation
+    simulationType: EM
+    temperature: 300
+    maxIterations: -1
+########################################################################
+  - stepName: 02_NVT_pre-equilibriation
+    simulationType: NVT
+    duration: 100 ps
+    timestep: 2 fs
+    temperature: 300
+    logInterval: 1 ps
+    restraintInfo: *equilibriationRestraints
+#########################################################################
+  - stepName: 03_NPT_pre-equilibriation
+    simulationType: NPT
+    duration: 100 ps
+    timestep: 2 fs
+    temperature: 300
+    logInterval: 1 ps
+    restraintInfo: *equilibriationRestraints
+########################################################################
+  - stepName: 04_NpT_slowTimeStep
+    simulationType: NpT
+    duration: 10 ps
+    timestep: 0.5 fs
+    temperature: 300
+    logInterval: 1 ps
+########################################################################
+  - stepName: 05_NPT_reference
+    simulationType: NpT
+    duration: 2 ns
+    timestep: 2 fs
+    temperature: 300
+    logInterval: 2 ps
+########################################################################
+  - stepName: 06_cmd_stats
+    simulationType: GAMD
+    duration: 2 ns
+    timestep: 2 fs
+    temperature: 300
+    logInterval: 2 ps
+    gamdInfo:
+      stage: cmd_stats
+      <<: *gamdSettings
+########################################################################
+  - stepName: 07_gamd_equil
+    simulationType: GAMD
+    duration: 6 ns
+    timestep: 2 fs
+    temperature: 300
+    logInterval: 2 ps
+    gamdInfo:
+      stage: gamd_equil
+      <<: *gamdSettings
+########################################################################
+  - stepName: 08_gamd_prod
+    simulationType: GAMD
+    duration: 30 ns
+    timestep: 2 fs
+    temperature: 300
+    logInterval: 0.2 ps          # dense gamd.log / cv.csv: reweighting needs many frames per bin
+    gamdInfo:
+      stage: gamd_prod
+      <<: *gamdSettings
+################################################

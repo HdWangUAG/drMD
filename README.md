@@ -819,7 +819,7 @@ A GaMD protocol has three stages. In **drMD** each stage is one entry in **simul
 | stage | what it does | typical length |
 |---|---|---|
 | `cmd_stats` | conventional MD (no boost); collects the maximum, minimum, mean and standard deviation of the potential energy | 1-10 ns |
-| `gamd_equil` | boost switched on; the boost parameters are re-derived from the running statistics every **updateInterval** steps | 10-50 ns |
+| `gamd_equil` | boost switched on; every **updateInterval** steps the boost parameters are re-derived from the running *Vmax* / *Vmin* and the *Vavg* / *sigmaV* of the last **updateInterval** steps, so they converge on the boosted ensemble | 10-50 ns |
 | `gamd_prod` | boost parameters frozen; this is the stage to analyse. Run at least three independent replicates (three copies of your input PDB in **inputDir**) | system dependent |
 
 Each stage starts from the statistics and parameters of the preceding `GAMD` step (persisted in `<stepName>_gamd.json`), and a step that is
@@ -856,9 +856,15 @@ keeps reweighting tractable. Larger values give more acceleration and noisier re
 
 <a id="updateinterval"></a>
 #### :anatomical_heart: updateInterval
-*(int)* During `gamd_equil`, how often (in time steps) the boost parameters are re-derived from the running statistics.
+*(int)* During `gamd_equil`, how often (in time steps) the boost parameters are re-derived, and the window over which *Vavg* and *sigmaV* are
+estimated for that (the equivalent of AMBER's `ntave`). A short window gives noisy parameters; keep it at 50-100 ps or more.
 
-**Default Value**: `500`
+**Default Value**: `50000` (100 ps at a 2 fs timestep)
+
+  > :medical_symbol:
+  > Do not expect *Vavg* in `gamd_equil` to equal the `cmd_stats` value: under a lower-bound boost the sampled potential energy is pushed
+  > towards *E* by roughly two thirds of *(Vmax − Vavg)*. What should hold is that the parameters stop changing during `gamd_equil`
+  > (compare the log lines) and that the boost distribution in `gamd.log` is Gaussian (see [reweighting](#reweighting)).
 
 <a id="excluderestraintsfromboost"></a>
 #### :anatomical_heart: excludeRestraintsFromBoost
@@ -929,7 +935,7 @@ simulationInfo:
     duration: "100 ns"
     timestep: "2 fs"
     temperature: 300
-    logInterval: "10 ps"
+    logInterval: "1 ps"          # gamd.log / cv.csv are written every logInterval: reweighting wants many frames
     gamdInfo:
       stage: "gamd_prod"
       <<: *gamdSettings
@@ -969,6 +975,11 @@ in that summary decide whether a profile is usable, and both are printed:
 
 - the **anharmonicity** of the boost distribution (`gamma = S_max − S`, 0 for a Gaussian): the cumulant expansion is reliable below ~0.01;
 - the **agreement between replicates** (RMSD and largest deviation between profiles, kcal/mol).
+
+> :medical_symbol:
+> The cumulant expansion needs the *variance* of the boost in every bin, so it needs far more frames than a plain histogram: aim for
+> hundreds of frames per bin (a 1 ps or shorter **logInterval** in `gamd_prod`, and coarse bins). With too few frames the reweighted
+> profile is dominated by noise even though the unreweighted one looks smooth.
 
 > :medical_symbol:
 > Like metadynamics, GaMD gives free energies. It does not give rate constants.
