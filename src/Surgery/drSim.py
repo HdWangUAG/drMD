@@ -184,18 +184,18 @@ def initialise_simulation(prmtop: app.AmberPrmtopFile,
                              sim: Dict,
                                saveFile: FilePath,
                                  refPdb: FilePath,
-                                   platform: str,
+                                   platform: Optional[openmm.Platform],
                                      hardwareInfo: Dict) -> Tuple[app.Simulation, openmm.Integrator]:
     """
     Create a System and a Simulation from a prmtop.
     Thin wrapper around build_system and build_simulation, kept for the existing callers.
-    NB. platform is not passed on to the Simulation here: EM / NVT / NPT steps let OpenMM
-    choose the fastest available platform, as they always have.
 
     Parameters
     ----------
     prmtop : app.Topology
         The topology of the system.
+    platform : openmm.Platform
+        The platform chosen from hardwareInfo (None lets OpenMM pick the fastest available).
 
     Returns
     -------
@@ -205,7 +205,7 @@ def initialise_simulation(prmtop: app.AmberPrmtopFile,
         The integrator attached to the simulation.
     """
     system: openmm.System = build_system(prmtop, inpcrd, sim, saveFile, refPdb)
-    simulation, integrator = build_simulation(prmtop, system, sim)
+    simulation, integrator = build_simulation(prmtop, system, sim, platform)
 
     return simulation , integrator
 

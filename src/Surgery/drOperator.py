@@ -94,7 +94,7 @@ def run_simulation(config: dict, outDir: str, inputCoords: str, amberParams: str
             drLogger.log_info(f"Skipping {stepName} for run: {protName}", True)
             continue
         if skipResumeSim == "resume":
-            drLogger.log_info(f"Resuming {stepName} from checkpoint file for run: {protName}", True)
+            drLogger.log_info(f"Resuming {sim['stepName']} from checkpoint file for run: {protName}", True)
             rename_out_files(simDir)    
 
         # Run simulation
@@ -123,12 +123,14 @@ def run_simulation(config: dict, outDir: str, inputCoords: str, amberParams: str
 def choose_platform(config: Dict) -> openmm.Platform:
     # Set up platform
     usePlatform: str = config["hardwareInfo"]["platform"]
-    if usePlatform == "CUDA":
+    if usePlatform.upper() == "CUDA":
         platform=openmm.Platform.getPlatformByName("CUDA")
-    elif usePlatform == "OpenCL":
+    elif usePlatform.upper() == "OPENCL":
         platform=openmm.Platform.getPlatformByName("OpenCL")
-    elif usePlatform == "CPU":
+    elif usePlatform.upper() == "CPU":
         platform=openmm.Platform.getPlatformByName("CPU")
+    else:
+        raise ValueError(f"Unknown platform {usePlatform}, must be CUDA, OpenCL or CPU")
 
     return platform
 ###########################################################################################
