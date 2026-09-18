@@ -17,8 +17,9 @@ Automated workflow for running molecular dynamics simulations with Amber and Ope
      - **Cluster Info**: [stepNames](#stepnamescluster) | [removeAtoms](#removeatomscluster) | [nClusters](#nclusters) | [clusterBy](#clusterby)
 4. **drMD Selection Syntax**: [keyword](#keyword) | [customSelection](#customselection)
 5. **Adding Restraints in drMD**: [restraintInfo](#restraintinfo) | [restraintType](#restrainttype) | [parameters](#parameters)
-6. **Running Metadynamics with drMD**: [metaDynamicsInfo](#metadynamicsinfo) | [height](#height) | [biasFactor](#biasfactor) | [frequency](#frequency) | [biases](#biases)
-7. **Worked Examples**
+6. **Running Metadynamics with drMD**: [metaDynamicsInfo](#metadynamicsinfo) | [height](#height) | [biasFactor](#biasfactor) | [frequency](#frequency) | [saveFrequency](#savefrequency) | [biasDir](#biasdir) | [freeEnergyInterval](#freeenergyinterval) | [biases](#biases) | [outputs](#metadynamicsoutputs)
+7. **Running Gaussian accelerated MD (GaMD) with drMD**: [gamdInfo](#gamdinfo) | [stage](#gamdstage) | [boostType](#boosttype) | [thresholdMode](#thresholdmode) | [sigma0P / sigma0D](#sigma0) | [updateInterval](#updateinterval) | [excludeRestraintsFromBoost](#excluderestraintsfromboost) | [ensemble](#gamdensemble) | [cvs](#gamdcvs) | [outputs](#gamdoutputs) | [reweighting](#reweighting)
+8. **Worked Examples**
     - [Example 1: MD Simulation of a Protein](#worked-example-1)
     - [Example 2: Restrained MD of Protein-Ligand Complex](#worked-example-2)
     - [Example 3: Energy Minimisation of Structures](#worked-example-3)
@@ -185,6 +186,10 @@ The **hardwareInfo** entry in the config file is a dictionary containing three p
 *(str)* This is the platform that will be used to run simulations in OpenMM. Accepted arguments for **platform** are *"CUDA"*, *"OpenCL"*, and *"CPU"*
 
 **Default Value**: `CPU`
+
+  > :medical_symbol:
+  > This setting is now applied to every step. Earlier versions ignored it for EM, NVT and NPT steps (OpenMM picked the fastest platform), so a config
+  > that omits **platform** on a GPU machine will now run on the CPU as documented - set `platform: CUDA` explicitly.
 
   > :medical_symbol:
   > If you have access to GPU acceleration using CUDA, we recommend this option. If you cant use CUDA but have access to OpenCL, this is a close second.
@@ -372,6 +377,7 @@ Each simulation dictionary contains the following parameters:
   > :medical_symbol:
   > For the majority of protein simulations, the NPT ensemble is used for production MD simulations, while the NVT ensemble is only used in equilibration steps
   - `META`:       This will run a Metadynamics simulation 
+  - `GAMD`:       This will run one stage of a Gaussian accelerated MD (GaMD) protocol (see [Running GaMD](#runninggamd))
 
 ### Selecting simulation temperature 
 For most simulations, a constant temperature is used. In this case the following parameter is required:
@@ -663,6 +669,35 @@ Within the **metaDynamicsInfo** dictionary, you must provide the following param
 #### :anatomical_heart: frequency
 *(int)* How often (in time steps) gaussians will be added to the bias potential
 
+**Default Value**: `500` (1 ps at a 2 fs timestep)
+
+  > :medical_symbol:
+  > **Changed default.** Earlier versions ignored this key and always deposited a Gaussian every 50 steps (100 fs at 2 fs), one to two orders of magnitude
+  > faster than usual practice (1-4 ps). That over-fills the free energy surface early and makes convergence estimates from the bias growth meaningless.
+  > The key is now honoured; values below 200 steps produce a warning in the log.
+
+<a id="savefrequency"></a>
+#### :anatomical_heart: saveFrequency
+*(int)* How often (in time steps) the bias potential is written to disk (and re-read from other walkers, see **biasDir**). Must be a multiple of **frequency**.
+
+**Default Value**: same as `frequency`
+
+<a id="biasdir"></a>
+#### :anatomical_heart: biasDir
+*(str)* Directory the bias is written to and read from. By default this is the step directory. Point several **drMD** runs (for example the
+replicates of one protein, or runs on different machines sharing a filesystem) at the same **biasDir** to run **multiple-walker metadynamics**:
+every walker adds its Gaussians to a shared bias. OpenMM tags each walker's bias files with a random id, which is also how a resumed run
+picks up its own earlier bias, so no walker id needs to be (or can be) set by hand.
+
+**Default Value**: the step directory
+
+<a id="freeenergyinterval"></a>
+#### :anatomical_heart: freeEnergyInterval
+*(str)* How often the current free energy surface is written to `freeEnergy_<t>ns.csv`, as a string "int unit" eg. "1 ns". Use these to check that
+the surface has stopped changing with time.
+
+**Default Value**: one tenth of the step's `duration`
+
 <a id="biases"></a>
 #### :anatomical_heart: biases
 *(list of dicts)* This is a list of dictionaries containing information about each biasVariable.
@@ -673,7 +708,7 @@ Within each dictionary in **biases** you must provide the following parameters:
 ###### :anatomical_heart: biasVar
 *(str)* This is the type of biasVariable that will be added.
 
-> Accepted arguments for **biasVar** are **"RMSD"**, **"torsion"** **"distance"** and **"angle"**
+> Accepted arguments for **biasVar** are **"RMSD"**, **"torsion"**, **"distance"**, **"COM_DISTANCE"** and **"angle"**
 
 <a id="minvalue"></a>
 ###### :anatomical_heart: minValue
@@ -691,11 +726,21 @@ Within each dictionary in **biases** you must provide the following parameters:
 ##### :anatomical_heart: selection
 *(dict)*  This is a dictionary containing information on the selection of atoms that the biasVariable will be applied to. The selection syntax is identical to that used for the restraints. For a full description of how to do this, see [**drMD** Selection syntax](#drmd-selection-syntax)
 
+##### :anatomical_heart: selection2
+*(dict)*  Only for **COM_DISTANCE**: the second group of atoms. The bias variable is the distance between the mass-weighted centre of mass of
+**selection** and that of **selection2**. Use this instead of **distance** when a single atom pair would be a noisy coordinate, for example
+the last few carbons of an acyl chain to a residue side chain.
+
 > :medical_symbol:
 > Depending on the type of bias variable, different numbers of atoms must be selected:
 > - Distance bias variables require two atoms to be selected
+> - COM_DISTANCE bias variables take any number of atoms in each of **selection** and **selection2** (with one atom in each they are identical to **distance**)
 > - Angle bias variables require three atoms to be selected
 > - Torsion bias variables require four atoms to be selected
+
+> :medical_symbol:
+> Units: **minValue**, **maxValue** and **biasWidth** are in angstrom for RMSD, distance and COM_DISTANCE, and in degrees for angle and torsion.
+> Torsions are periodic, the other variables are not.
 
 > :medical_symbol:
 > You will also need to specify at least one biasVariable for the simulation to sample.
@@ -707,7 +752,9 @@ Example MetaDynamics syntax:
     metaDynamicsInfo:
       height: 2
       biasFactor: 5
-      frequency: 50
+      frequency: 500
+      saveFrequency: 500
+      freeEnergyInterval: "1 ns"
       biases: 
         - biasVar: "RMSD"
           minValue: 0
@@ -716,6 +763,9 @@ Example MetaDynamics syntax:
           selection: 
             keyword: "backbone"
         - biasVar: "torsion"
+          minValue: -180
+          maxValue: 180
+          biasWidth: 5.73
           selection: 
             keyword: "custom"
             customSelection:
@@ -723,11 +773,206 @@ Example MetaDynamics syntax:
             - {CHAIN_ID: "A", RES_NAME: "ALA", RES_ID: 2, ATOM_NAME: "CA"}
             - {CHAIN_ID: "A", RES_NAME: "ALA", RES_ID: 3, ATOM_NAME: "CA"}
             - {CHAIN_ID: "A", RES_NAME: "ALA", RES_ID: 4, ATOM_NAME: "CA"}
+        - biasVar: "COM_DISTANCE"
+          minValue: 2
+          maxValue: 15
+          biasWidth: 0.5
+          selection:
+            keyword: "custom"
+            customSelection:
+            - {CHAIN_ID: "B", RES_NAME: "LIG", RES_ID: 1, ATOM_NAME: [C14, C15, C16]}
+          selection2:
+            keyword: "custom"
+            customSelection:
+            - {CHAIN_ID: "A", RES_NAME: "SER", RES_ID: 101, ATOM_NAME: [CB, OG]}
 
 ```
 
-This example will add a RMSD bias to the backbone of the protein
-and a torsion bias between the CA atoms of residues 1, 2, 3, and 4 of the protein
+This example will add a RMSD bias to the backbone of the protein,
+a torsion bias between the CA atoms of residues 1, 2, 3, and 4 of the protein,
+and a bias on the distance between the centre of mass of three ligand carbons and the centre of mass of a serine side chain
+
+<a id="metadynamicsoutputs"></a>
+### :brain: Metadynamics outputs
+In the step directory (reporter files are moved to `00_reporters_and_plots` after the step):
+
+- `freeEnergy.csv`: the final free energy surface from `Metadynamics.getFreeEnergy()` (kJ/mol) on the bias grid. For two bias variables, rows run over the second variable and columns over the first, from **minValue** to **maxValue**.
+- `freeEnergy_<t>ns.csv`: the same surface every **freeEnergyInterval**. A converged run's surfaces stop changing (up to a constant offset) with time.
+- `cv.csv`: `step, time_ps, cv_0 ... cv_n, bias_energy_kJ` every **logInterval**: the value of every bias variable (angstrom / degrees) and the bias energy at that frame. The standard convergence check is that each variable crosses its range repeatedly (round-trips) rather than sitting in one basin; this file is also what you need to reweight any other observable afterwards.
+- `bias_<id>_<n>.npy`: the bias grid of this walker, written every **saveFrequency** steps (needed to resume and for multiple walkers).
+
+> :medical_symbol:
+> Metadynamics gives free energy differences between states, not rate constants.
+
+---
+
+<a id="runninggamd"></a>
+## :medical_symbol: Running Gaussian accelerated MD (GaMD) with **drMD** :medical_symbol:
+Gaussian accelerated MD [(Miao, Feher & McCammon, *JCTC* 2015)](https://doi.org/10.1021/acs.jctc.5b00436) accelerates sampling without choosing a
+collective variable. Whenever the potential energy *V* drops below a threshold *E*, a harmonic boost *ΔV = ½ k (E − V)²* is added, which flattens the
+energy landscape. Because the boost is a simple function of the energy, and its distribution is close to Gaussian, the unbiased free energy along
+any coordinate can be recovered afterwards by reweighting (see [reweighting](#reweighting)). Use it as a CV-free check next to metadynamics, to find
+states that your collective variable was not chosen to see.
+
+A GaMD protocol has three stages. In **drMD** each stage is one entry in **simulationInfo** with **simulationType** `GAMD`, run one after the other:
+
+| stage | what it does | typical length |
+|---|---|---|
+| `cmd_stats` | conventional MD (no boost); collects the maximum, minimum, mean and standard deviation of the potential energy | 1-10 ns |
+| `gamd_equil` | boost switched on; the boost parameters are re-derived from the running statistics every **updateInterval** steps | 10-50 ns |
+| `gamd_prod` | boost parameters frozen; this is the stage to analyse. Run at least three independent replicates (three copies of your input PDB in **inputDir**) | system dependent |
+
+Each stage starts from the statistics and parameters of the preceding `GAMD` step (persisted in `<stepName>_gamd.json`), and a step that is
+killed resumes from its own json and checkpoint rather than restarting the previous stage.
+
+<a id="gamdinfo"></a>
+### :brain: gamdInfo
+*(dict)* This is a dictionary containing the parameters for the GaMD stage. Everything except **stage** has a default.
+
+<a id="gamdstage"></a>
+#### :anatomical_heart: stage
+*(str)* `cmd_stats`, `gamd_equil` or `gamd_prod` (see the table above). The first `GAMD` step of a config must be `cmd_stats`.
+
+<a id="boosttype"></a>
+#### :anatomical_heart: boostType
+*(str)* Which potential is boosted: `total` (the whole potential energy), `dihedral` (the periodic torsion term only) or `dual` (both).
+
+**Default Value**: `dual`
+
+<a id="thresholdmode"></a>
+#### :anatomical_heart: thresholdMode
+*(str)* How the threshold *E* is set: `lower` (*E = Vmax*) or `upper` (*E = Vmin + (Vmax − Vmin)/k0*). The upper bound gives a larger boost but is
+only valid when it yields *0 < k0 ≤ 1*; when it does not, **drMD** falls back to the lower bound and says so in the log and in the json.
+
+**Default Value**: `lower`
+
+<a id="sigma0"></a>
+#### :anatomical_heart: sigma0P / sigma0D
+*(float)* Upper limit on the standard deviation of the boost potential (kcal/mol) for the total (`sigma0P`) and dihedral (`sigma0D`) boosts. This is what
+keeps reweighting tractable. Larger values give more acceleration and noisier reweighting; if the temperature drifts or the protein RMSD blows up during
+`gamd_equil`, this is too loose.
+
+**Default Value**: `6.0` for both
+
+<a id="updateinterval"></a>
+#### :anatomical_heart: updateInterval
+*(int)* During `gamd_equil`, how often (in time steps) the boost parameters are re-derived from the running statistics.
+
+**Default Value**: `500`
+
+<a id="excluderestraintsfromboost"></a>
+#### :anatomical_heart: excludeRestraintsFromBoost
+*(bool)* If `True`, any restraints from **restraintInfo** are kept in a separate force group that is neither part of the boosted energy nor scaled by the
+boost, so the boost cannot fight a restraint you imposed deliberately. The choice is stated in the automatic methods section.
+
+**Default Value**: `True`
+
+<a id="gamdensemble"></a>
+#### :anatomical_heart: ensemble
+*(str)* `NPT` (a Monte-Carlo barostat at 1 bar is added, as for NPT steps) or `NVT`. It must be the same for every `GAMD` step, so that the
+statistics are collected in the ensemble used for production.
+
+**Default Value**: `NPT`
+
+  > :medical_symbol:
+  > With `NPT`, the barostat's volume moves are accepted on the unboosted potential energy, as in other GaMD implementations. Volume fluctuations
+  > couple only weakly to the boost, but if you want to avoid the question entirely, run all three stages with `ensemble: NVT` after an NPT equilibration.
+
+<a id="gamdcvs"></a>
+#### :anatomical_heart: cvs
+*(list of dicts, optional)* Collective variables to record to `cv.csv` every **logInterval** (they do not affect the simulation). Each entry uses the
+same syntax as a metadynamics bias (**biasVar**, **selection**, and **selection2** for COM_DISTANCE) without **minValue** / **maxValue** / **biasWidth**.
+Recording the coordinate you will reweight along here gives you a `cv.csv` that lines up frame-for-frame with `gamd.log`.
+
+Example GaMD syntax (the three stages, sharing a YAML anchor for the settings that must not change between them):
+```yaml
+gamdSettings: &gamdSettings
+  boostType: "dual"
+  thresholdMode: "lower"
+  sigma0P: 6.0
+  sigma0D: 6.0
+  updateInterval: 500
+  excludeRestraintsFromBoost: True
+  ensemble: "NPT"
+  cvs:
+    - biasVar: "torsion"
+      selection:
+        keyword: "custom"
+        customSelection:
+        - {CHAIN_ID: "A", RES_NAME: "ACE", RES_ID: 1, ATOM_NAME: "C"}
+        - {CHAIN_ID: "A", RES_NAME: "ALA", RES_ID: 2, ATOM_NAME: "N"}
+        - {CHAIN_ID: "A", RES_NAME: "ALA", RES_ID: 2, ATOM_NAME: "CA"}
+        - {CHAIN_ID: "A", RES_NAME: "ALA", RES_ID: 2, ATOM_NAME: "C"}
+
+simulationInfo:
+  # ... energy minimisation and equilibration steps as usual ...
+  - stepName: "06_cmd_stats"
+    simulationType: "GAMD"
+    duration: "2 ns"
+    timestep: "2 fs"
+    temperature: 300
+    logInterval: "10 ps"
+    gamdInfo:
+      stage: "cmd_stats"
+      <<: *gamdSettings
+  - stepName: "07_gamd_equil"
+    simulationType: "GAMD"
+    duration: "20 ns"
+    timestep: "2 fs"
+    temperature: 300
+    logInterval: "10 ps"
+    gamdInfo:
+      stage: "gamd_equil"
+      <<: *gamdSettings
+  - stepName: "08_gamd_prod"
+    simulationType: "GAMD"
+    duration: "100 ns"
+    timestep: "2 fs"
+    temperature: 300
+    logInterval: "10 ps"
+    gamdInfo:
+      stage: "gamd_prod"
+      <<: *gamdSettings
+```
+
+> :medical_symbol:
+> `GAMD` steps need a single **temperature** (not **temperatureRange**). **heavyProtons** and **restraintInfo** work as for other steps.
+
+<a id="gamdoutputs"></a>
+### :brain: GaMD outputs
+In each `GAMD` step directory:
+
+- `gamd.log`: `step, time_ps, V_total, V_dihedral, dV_P, dV_D` (kcal/mol) every **logInterval**, one row per trajectory frame. `V_total` is the boosted
+  potential energy (everything except excluded restraints), `dV_P` / `dV_D` the total and dihedral boosts at that frame. **This is the only input reweighting
+  needs, so it is always written.**
+- `<stepName>_gamd.json`: the potential energy statistics (`Vmax`, `Vmin`, `Vavg`, `sigmaV`, in kcal/mol) and the boost parameters (`k0`, `k`, `E`, threshold
+  actually used) for the total (`P`) and dihedral (`D`) boosts, plus the number of steps completed. Compare `Vavg` between `cmd_stats` and `gamd_equil`:
+  they should agree.
+- `cv.csv`: the collective variables from **cvs**, if any (moved to `00_reporters_and_plots`).
+- the usual `vitals_report.csv`, trajectory, checkpoint and state files.
+
+<a id="reweighting"></a>
+### :brain: Reweighting GaMD to a free energy profile
+`src/ExaminationRoom/drReweight.py` turns `gamd.log` + `cv.csv` into a potential of mean force along any recorded coordinate:
+
+```bash
+python src/ExaminationRoom/drReweight.py \
+    --gamdLog outputs/prot_rep1/08_gamd_prod/gamd.log outputs/prot_rep2/08_gamd_prod/gamd.log \
+    --cv outputs/prot_rep1/08_gamd_prod/00_reporters_and_plots/cv.csv outputs/prot_rep2/08_gamd_prod/00_reporters_and_plots/cv.csv \
+    --columns cv_0 cv_1 --bins 36 36 --min -180 -180 --max 180 180 --temperature 300 --outDir reweighted
+```
+
+The default method is the **second-order cumulant expansion** (Gaussian approximation) of the reweighting factor, which is the only estimator that is
+usable at typical boost magnitudes; direct exponential averaging (`--method exp`) is provided for reference and `--method none` gives the unreweighted
+(boosted) profile. It writes one PMF per replicate (`pmf_rep<n>.csv` / `.png`), their mean and per-bin spread, and `reweight_summary.json`. Two numbers
+in that summary decide whether a profile is usable, and both are printed:
+
+- the **anharmonicity** of the boost distribution (`gamma = S_max − S`, 0 for a Gaussian): the cumulant expansion is reliable below ~0.01;
+- the **agreement between replicates** (RMSD and largest deviation between profiles, kcal/mol).
+
+> :medical_symbol:
+> Like metadynamics, GaMD gives free energies. It does not give rate constants.
+
 ---
 
 ## Advanced YAML-ing with variables
@@ -1318,7 +1563,7 @@ The above config sets up a metadynamics simulation with the backbone torsions φ
 For a detailed technical description of metadynamics, we recommend [this review](https://www.nature.com/articles/s42254-020-0153-0). Note that **drMD** implements [Well-Tempered metadynamics](https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.100.020603).
 
 ### Free energy landscape of collective variables
-Once our `06_Metadynamics` step is complete, **drMD** will automatically create a file called `freeEnergy.csv`, located in the `/path/to/06_Metadynamics/reporters_and_plots` directory. This file contains the free energy landscape of the with respect to our chosen collective variables. When we plot this free energy landscape, we see the following:
+Once our `06_Metadynamics` step is complete, **drMD** will automatically create a file called `freeEnergy.csv`, located in the `/path/to/06_Metadynamics/00_reporters_and_plots` directory. This file contains the free energy landscape of the with respect to our chosen collective variables. Next to it you will find `freeEnergy_<t>ns.csv` snapshots of the landscape through the run (it should stop changing before the end) and `cv.csv`, the phi / psi time series, which should show the dipeptide crossing between basins many times. When we plot this free energy landscape, we see the following:
 
 <img src="./images/Alanine_dipeptide_FEL.png" alt="The Free Energy Landscape of φ and ψ torsions of alanine dipeptide" width="400"/>
 
