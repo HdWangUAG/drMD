@@ -870,31 +870,36 @@ def check_selection(selection: dict) -> list:
             chainId = customSelctionDict.get("CHAIN_ID", None)
             if chainId is None:
                 selectionDisorders.append("No CHAIN_ID specified in selection")
-            ## check resName
+            ## check resName (a string, or a list of strings: drSelector matches any of them)
             resName = customSelctionDict.get("RES_NAME", None)
+            resNames = resName if isinstance(resName, list) else [resName]
             if resName is None:
                 selectionDisorders.append("No RES_NAME specified in selection")
-            elif resName == "all":
+            elif resName in ["all", "_"]:
                 pass
-            elif not isinstance(resName, str):
-                selectionDisorders.append("RES_NAME must be a three-letter string")
-            elif len(resName) > 3:
+            elif not all(isinstance(name, str) for name in resNames):
+                selectionDisorders.append("RES_NAME must be a three-letter string (or a list of them)")
+            elif any(len(name) > 3 for name in resNames):
                 selectionDisorders.append("RES_NAME must be an up-to three-letter string")
-            ## check resId
+            ## check resId (an integer, or a list of integers)
             resId = customSelctionDict.get("RES_ID", None)
+            resIds = resId if isinstance(resId, list) else [resId]
             if resId is None:
                 selectionDisorders.append("No RES_ID specified in selection")
             elif resId == "_":
                 pass
-            elif not isinstance(resId, int):
-                selectionDisorders.append("RES_ID must be an integer")
-            ## check atomName
+            elif not all(isinstance(identifier, int) and not isinstance(identifier, bool) for identifier in resIds):
+                selectionDisorders.append("RES_ID must be an integer (or a list of integers)")
+            ## check atomName (a string, or a list of strings)
             atomName = customSelctionDict.get("ATOM_NAME", None)
+            atomNames = atomName if isinstance(atomName, list) else [atomName]
             if atomName is None:
                 selectionDisorders.append("No ATOM_NAME specified in selection")
-            elif not isinstance(atomName, str):
-                selectionDisorders.append("ATOM_NAME must be a string")
-            elif len(atomName) > 4:
+            elif atomName == "_":
+                pass
+            elif not all(isinstance(name, str) for name in atomNames):
+                selectionDisorders.append("ATOM_NAME must be a string (or a list of strings)")
+            elif any(len(name) > 4 for name in atomNames):
                 selectionDisorders.append("ATOM_NAME must be a string less than 4 characters")
 
     return selectionDisorders

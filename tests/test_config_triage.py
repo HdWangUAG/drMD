@@ -119,7 +119,17 @@ def test_misc_force_field_options():
     print("proteinForceField / extraFrcmods validation OK")
 
 
+def test_custom_selection_lists():
+    listSel = {"keyword": "custom", "customSelection": [{"CHAIN_ID": "A", "RES_NAME": ["THR", "ILE"], "RES_ID": [54, 63], "ATOM_NAME": ["CB", "CG2", "CD1"]}]}
+    assert drConfigTriage.check_selection({"selection": listSel}) == []
+    assert drConfigTriage.check_selection({"selection": {"keyword": "custom", "customSelection": [{"CHAIN_ID": "A", "RES_NAME": "THR", "RES_ID": 54, "ATOM_NAME": "_"}]}}) == []
+    bad = drConfigTriage.check_selection({"selection": {"keyword": "custom", "customSelection": [{"CHAIN_ID": "A", "RES_NAME": "THR", "RES_ID": ["54"], "ATOM_NAME": "CB"}]}})
+    assert bad and "RES_ID" in bad[0]
+    print("customSelection list values OK")
+
+
 if __name__ == "__main__":
+    test_custom_selection_lists()
     test_misc_force_field_options()
     test_gamd_defaults_and_sequence()
     test_gamd_rejections()
