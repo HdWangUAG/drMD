@@ -63,7 +63,7 @@ def methods_writer_protocol(batchConfig: Dict, configDir: DirectoryPath, outDir:
     ## write solvation related methods
     write_solvation_charge_balance_methods(batchConfig, configDicts, methodsFile)
     ## write forcefield related methods
-    write_forecefields_methods(methodsFile)
+    write_forecefields_methods(methodsFile, batchConfig)
     ## write simulation related methods
     simulationInfo: dict = configDicts[0]["simulationInfo"]
     write_simulation_methods(methodsFile, simulationInfo)
@@ -763,19 +763,25 @@ def write_generic_simulation_methods(methodsFile: FilePath, simulationInfo: dict
         methods.write(f"In all simulations, bonds lengths and angles of water molecules were constrained using the SETTLE algorithm [Ref. {cite('settle')}]. ")
         
 ##########################################################################################
-def write_forecefields_methods(methodsFile):
+def write_forecefields_methods(methodsFile, batchConfig: Dict = None):
     """
     Writes methods section talking about forcefields, generic to all simulations run by drMD
     
     Args:
         methodsFile: (FilePath) Path to methods file
+        batchConfig: (Dict) batch config, used for miscInfo.proteinForceField / extraFrcmods
 
     Returns:
         None    
     """
+    miscInfo = (batchConfig or {}).get("miscInfo", {})
+    proteinForceField = miscInfo.get("proteinForceField", "ff19SB")
+    extraFrcmods = miscInfo.get("extraFrcmods", []) or []
     with open(methodsFile, "a", encoding = "utf-8") as methods:
         methods.write("## Forcefield Information\n\n")
-        methods.write(f"All protein residues were parameterised using the AMBER ff19SB and forcefield [Ref. {cite('ff19SB')}]. ")
+        methods.write(f"All protein residues were parameterised using the AMBER {proteinForceField} forcefield [Ref. {cite(proteinForceField)}]. ")
+        if len(extraFrcmods) > 0:
+            methods.write(f"Additional parameters were loaded from {format_list([p.basename(f) for f in extraFrcmods])}. ")
         methods.write(f" These parameters were prepared using tleap from the Ambertools package [Ref. {cite('ambertools')}]. ")
         methods.write(f"Simulations were performed in explicit solvent. All water molecules parameterised using the TIP3P model [Ref. {cite('tip3pParams')}]. ")
         methods.write(f"Any ions in our system were treated using parameters calculated to complement the TIP3P water model [Ref. {cite('ionParams')}]. \n\n")
@@ -827,7 +833,8 @@ def cite(key: str) -> str:
         ## parameter citations
         "ionParams": ["10.1021/ct500918t", "10.1021/ct400146w"],
         "tip3pParams": ["/10.1063/1.472061"],
-        "ff19SB": ["10.1021/acs.jctc.9b00591"]
+        "ff19SB": ["10.1021/acs.jctc.9b00591"],
+        "ff14SB": ["10.1021/acs.jctc.5b00255"]
     }
 
 

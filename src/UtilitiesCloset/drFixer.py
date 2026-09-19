@@ -172,6 +172,9 @@ def _account_for_no_CA_ncaas(pdbDf: pd.DataFrame, ncaaNames: list[str]) -> pd.Da
                 if "CA" not in resAtomNames:
                     referenceAtom = resAtomNames[0]
                     ncaaRefDfs.append(resDf[resDf["ATOM_NAME"] == referenceAtom])
+    ## ncAAs that do have a CA are already covered by the CA-based matching
+    if len(ncaaRefDfs) == 0:
+        return pdbDf.iloc[0:0]
     return pd.concat(ncaaRefDfs)
 ##################################################################################################
 def reset_chain_residues_protein(templateDf: pd.DataFrame, inputDf: pd.DataFrame, ncaaNames: list[str]) -> pd.DataFrame:

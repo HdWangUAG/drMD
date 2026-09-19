@@ -6,6 +6,8 @@ from subprocess import run
 import string
 from shutil import copy
 import logging
+import hashlib
+import json
 import pandas as pd
 import numpy as np
 
@@ -824,11 +826,21 @@ def make_amber_params(
     ## box size
     boxSize: int = config["miscInfo"]["boxSize"]
 
+    ## protein force field (ff19SB unless miscInfo.proteinForceField says otherwise)
+    proteinForceField: str = config["miscInfo"].get("proteinForceField", "ff19SB")
+    ## extra parameter files (e.g. junction terms between a non-canonical residue and the protein force field),
+    ## loaded after the ligand / ncAA parameters so that they take precedence; paths are relative to inputDir
+    extraFrcmods: List[FilePath] = resolve_extra_frcmods(config)
+    ## every parameter file loaded is recorded, in order, with its sha256 in parameter_manifest.json
+    parameterManifest: List[Dict] = [{"file": f"leaprc.protein.{proteinForceField}", "role": "protein force field"},
+                                     {"file": "leaprc.gaff2", "role": "ligand / ncAA force field"},
+                                     {"file": "leaprc.water.tip3p", "role": "water model"}]
+
     # Write the TLEAP input file
     tleapInput: str = p.join(outDir, "TLEAP.in")
     with open(tleapInput, "w") as f:
         # Load Amber force fields and TIP3P water model
-        f.write("source leaprc.protein.ff19SB\n")
+        f.write(f"source leaprc.protein.{proteinForceField}\n")
         f.write("source leaprc.gaff2\n")
         f.write("source leaprc.water.tip3p\n\n")
 
@@ -844,22 +856,34 @@ def make_amber_params(
                 ligLib: FilePath = ligandInfo.get("lib",False)
                 if p.isfile(ligMol2):
                     f.write(f"{ligandName} = loadmol2 {ligMol2}\n")
+                    parameterManifest.append(manifest_entry(ligMol2, f"ligand {ligandName} mol2"))
                 if p.isfile(ligFrcmod):
                     f.write(f"loadamberparams {ligFrcmod}\n")
+                    parameterManifest.append(manifest_entry(ligFrcmod, f"ligand {ligandName} frcmod"))
                 if p.isfile(ligLib):
                     f.write(f"loadoff {ligLib}\n")
+                    parameterManifest.append(manifest_entry(ligLib, f"ligand {ligandName} lib"))
 
         for ncaaName, ncaaData in nonCannonicalAminoAcidData.items():
             ncaaMol2: FilePath = ncaaData["mol2"]
             ncaaFrcmod: FilePath = ncaaData["frcmod"]
             ncaaLib: FilePath = ncaaData["lib"]
             if p.isfile(ncaaMol2):
-                f.write(f"ncaa = loadmol2 {ncaaMol2}\n")
+                f.write(f"{ncaaName} = loadmol2 {ncaaMol2}\n")
+                parameterManifest.append(manifest_entry(ncaaMol2, f"ncAA {ncaaName} mol2"))
             if p.isfile(ncaaFrcmod):
                 f.write(f"loadamberparams {ncaaFrcmod}\n")
+                parameterManifest.append(manifest_entry(ncaaFrcmod, f"ncAA {ncaaName} frcmod"))
             if p.isfile(ncaaLib):
                 f.write(f"loadoff {ncaaLib}\n")
-  
+                parameterManifest.append(manifest_entry(ncaaLib, f"ncAA {ncaaName} lib"))
+
+        # Load any extra parameter files last, so they take precedence over the ones above
+        for extraFrcmod in extraFrcmods:
+            f.write(f"loadamberparams {extraFrcmod}\n")
+            parameterManifest.append(manifest_entry(extraFrcmod, "extra frcmod (miscInfo.extraFrcmods)"))
+        f.write("\n")
+
         # Load the protein structure
         f.write(f"mol = loadpdb {pdbFile}\n")
 
@@ -881,6 +905,12 @@ def make_amber_params(
         f.write(f"saveamberparm mol {prmTop} {inputCoords}\n")
         f.write("quit\n")
 
+    ## record what was loaded, in order, with hashes
+    with open(p.join(outDir, "parameter_manifest.json"), "w") as f:
+        json.dump(parameterManifest, f, indent=2)
+    for entry in parameterManifest:
+        drLogger.log_info(f"tleap parameter file: {entry['file']} ({entry['role']}) sha256 {entry.get('sha256', '-')}")
+
     # Execute TLEAP and log the output
     tleapOutput: FilePath = p.join(outDir, "TLEAP.out")
     amberParams: FilePath = p.join(outDir, f"{outName}.prmtop")
@@ -895,6 +925,28 @@ def make_amber_params(
     solvatedPdb: FilePath = p.join(outDir, solvatedPdb)
     return inputCoords, amberParams, solvatedPdb
 
+def manifest_entry(parameterFile: FilePath, role: str) -> Dict:
+    """One parameter_manifest.json entry: absolute path, role and sha256 of the file."""
+    with open(parameterFile, "rb") as f:
+        digest: str = hashlib.sha256(f.read()).hexdigest()
+    return {"file": p.abspath(parameterFile), "role": role, "sha256": digest}
+#####################################################################################
+def resolve_extra_frcmods(config: Dict) -> List[FilePath]:
+    """
+    miscInfo.extraFrcmods: extra parameter files loaded with loadamberparams after the ligand and
+    non-canonical residue parameters. Relative paths are resolved against inputDir. Missing files
+    are an error (silently dropping a parameter file would change the Hamiltonian).
+    """
+    extraFrcmods: List[FilePath] = config["miscInfo"].get("extraFrcmods", None) or []
+    inputDir: DirectoryPath = config["pathInfo"]["inputDir"]
+    resolved: List[FilePath] = []
+    for extraFrcmod in extraFrcmods:
+        fullPath: FilePath = extraFrcmod if p.isabs(extraFrcmod) else p.join(inputDir, extraFrcmod)
+        if not p.isfile(fullPath):
+            raise FileNotFoundError(f"extraFrcmods entry not found: {fullPath}")
+        resolved.append(p.abspath(fullPath))
+    return resolved
+#####################################################################################
 def make_amber_renumbered_pdb(inPdb, outPdb):
     inDf = pdbUtils.pdb2df(inPdb)
 

@@ -100,7 +100,27 @@ def test_metadynamics_frequency():
     print("metadynamics frequency / saveFrequency / COM_DISTANCE validation OK")
 
 
+def test_misc_force_field_options():
+    cfg = validate(base_config([gamd_step("01_stats", "cmd_stats")]))
+    assert cfg["miscInfo"]["proteinForceField"] == "ff19SB" and cfg["miscInfo"]["extraFrcmods"] == []
+    base = base_config([gamd_step("01_stats", "cmd_stats")])
+    base["miscInfo"]["proteinForceField"] = "ff14SB"
+    assert validate(base)["miscInfo"]["proteinForceField"] == "ff14SB"
+    base["miscInfo"]["proteinForceField"] = "ff99SB"
+    assert validate(base) is None
+    base["miscInfo"]["proteinForceField"] = "ff14SB"
+    base["miscInfo"]["extraFrcmods"] = ["does_not_exist.frcmod"]
+    assert validate(base) is None
+    existing = p.join(ROOT, "ExampleInputs", "Worked_Example_7_Non_Canonical_Amino_Acids", "AIB.frcmod")
+    base["miscInfo"]["extraFrcmods"] = [existing]
+    assert validate(base)["miscInfo"]["extraFrcmods"] == [existing]
+    base["miscInfo"]["extraFrcmods"] = "AIB.frcmod"
+    assert validate(base) is None
+    print("proteinForceField / extraFrcmods validation OK")
+
+
 if __name__ == "__main__":
+    test_misc_force_field_options()
     test_gamd_defaults_and_sequence()
     test_gamd_rejections()
     test_metadynamics_frequency()

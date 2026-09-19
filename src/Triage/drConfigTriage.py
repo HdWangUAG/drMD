@@ -316,6 +316,34 @@ def check_miscInfo(config:dict, configDefaults:dict) -> Tuple[dict,dict,bool]:
         else:
             miscInfoDisorders["boxSize"] = None
 
+    ## validate proteinForceField
+    proteinForceField = miscInfo.get("proteinForceField", None)
+    if proteinForceField is None:
+        config["miscInfo"]["proteinForceField"] = "ff19SB"
+        miscInfoDisorders["proteinForceField"] = "No proteinForceField specified, using default of ff19SB"
+    elif not isinstance(proteinForceField, str) or proteinForceField not in ["ff19SB", "ff14SB"]:
+        miscInfoDisorders["proteinForceField"] = "proteinForceField must be 'ff19SB' or 'ff14SB'"
+        miscInfoOk = False
+    else:
+        miscInfoDisorders["proteinForceField"] = None
+
+    ## validate extraFrcmods (optional list of parameter files, relative to inputDir or absolute)
+    extraFrcmods = miscInfo.get("extraFrcmods", None)
+    if extraFrcmods is None:
+        config["miscInfo"]["extraFrcmods"] = []
+        miscInfoDisorders["extraFrcmods"] = None
+    elif not isinstance(extraFrcmods, list) or not all(isinstance(f, str) for f in extraFrcmods):
+        miscInfoDisorders["extraFrcmods"] = "extraFrcmods must be a list of file paths"
+        miscInfoOk = False
+    else:
+        inputDir = config.get("pathInfo", {}).get("inputDir", "")
+        missing = [f for f in extraFrcmods if not p.isfile(f if p.isabs(f) else p.join(inputDir, f))]
+        if len(missing) > 0:
+            miscInfoDisorders["extraFrcmods"] = f"extraFrcmods files not found: {missing}"
+            miscInfoOk = False
+        else:
+            miscInfoDisorders["extraFrcmods"] = None
+
     ## validate skipPdbTriage
     skipPdbTriage = miscInfo.get("skipPdbTriage", None)
     if skipPdbTriage is None:
