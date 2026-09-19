@@ -9,7 +9,7 @@ Automated workflow for running molecular dynamics simulations with Amber and Ope
 3. **Config Syntax**
    - **Path Info**: [inputDir](#inputdir) | [outputDir](#outputdir)
    - **Hardware Info**: [platform](#platform) |[parallelCPU](#parallelcpu) | [subprocessCpus](#subprocesscpus)
-   - **Misc Info**: [pH](#pH) | [firstAidMaxRetries](#firstaidmaxretries) | [boxGeometry](#boxgeometry) | [boxSize](#boxsize) | [writeMyMethodsSection](#writemymethodssection) | [skipPdbTriage](#skippdbtriage) | [trajectorySelections](#trajectoryselections)
+   - **Misc Info**: [pH](#pH) | [firstAidMaxRetries](#firstaidmaxretries) | [boxGeometry](#boxgeometry) | [boxSize](#boxsize) | [proteinForceField](#proteinforcefield) | [extraFrcmods](#extrafrcmods) | [writeMyMethodsSection](#writemymethodssection) | [skipPdbTriage](#skippdbtriage) | [trajectorySelections](#trajectoryselections)
    - **Ligand Info**: [ligandName](#ligandname) | [protons](#protons) | [charge](#charge) | [frcmod](#frcmod) | [mol2](#mol2)
    - **Simulation Info**: [stepName](#stepname) | [simulationType](#simulationtype) | [temperature](#temperature) | [temperatureRange](#temperaturerange) | [maxIterations](#maxiterations) | [duration](#duration) | [timestep](#timestep) | [logInterval](#loginterval)
    - **Aftercare Info**: 
@@ -253,6 +253,21 @@ This section allows you to set some general options for your simulations:
 *(int)* This determines the size of the solvation box that will be used in your simulations. A water box around your protein will be created such that the box is at least `boxSize` angstroms from your protein.
 
 **Default Value**: 10
+
+<a id="proteinforcefield"></a>
+### :anatomical_heart:  proteinForceField
+*(str)* The AMBER protein force field sourced in tleap: `ff19SB` or `ff14SB`. Use `ff14SB` when your non-canonical residue or ligand parameters were built
+against ff14SB atom types, or to stay comparable with an existing ff14SB campaign (ff19SB adds residue-specific CMAP terms that a custom residue will not have).
+
+**Default Value**: `ff19SB`
+
+<a id="extrafrcmods"></a>
+### :anatomical_heart:  extraFrcmods
+*(list of str)* Extra parameter files loaded with `loadamberparams` **after** the ligand and non-canonical residue parameters (so they take precedence),
+for example junction terms between a non-canonical residue and the protein force field. Paths are relative to **inputDir** or absolute; a missing file is an
+error. Every parameter file tleap loads is listed, in order and with its SHA256, in `00_prep/PROT/parameter_manifest.json`.
+
+**Default Value**: `[]`
 
 <a id="writemymethodsection"></a>
 ### :anatomical_heart:  writeMyMethodsSection
