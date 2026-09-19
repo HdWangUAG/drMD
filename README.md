@@ -593,7 +593,7 @@ Within the restraintInfo list, you must provided at least one dictionary that co
 
 <a id="restrainttype"></a>
 ##### :anatomical_heart: restraintType
- *(str)* This is the type of restraints that will be added. Accepted arguments are: "distance", "angle", "dihedral", "position"
+ *(str)* This is the type of restraints that will be added. Accepted arguments are: "distance", "angle", "torsion", "position", "comDistanceWall"
 
 <a id="parameters"></a>
 ##### :anatomical_heart: parameters
@@ -620,6 +620,14 @@ Additional entries in the parameters dictionary depend on the type of restraints
 ###### :anatomical_heart: phi0
 *(int or float)*  *Required for torsion restraints*. This is the angle in degrees that the dihedral should be constrained to
 
+<a id="upper"></a>
+###### :anatomical_heart: upper
+*(int or float)*  *Required for comDistanceWall restraints*. This is the distance in Angstroms beyond which the wall acts. A **comDistanceWall** is a
+one-sided harmonic wall on the distance between the mass-weighted centres of mass of two groups of atoms (**selection** and **selection2**):
+no force is applied while the centre-of-mass distance is below **upper**, above it the energy is 0.5 * k * (d - upper)^2. Its intended use is to keep a
+metadynamics **COM_DISTANCE** bias variable inside its grid (for example, to stop an acyl chain from leaving a binding pocket, and the bias variable
+from exceeding its **maxValue**), without biasing the sampling below the wall
+
 All restraints require the selection parameter. This tells **drMD** what atoms to apply the restraint to
 
 <a id="selectionrestraints"></a>
@@ -629,6 +637,10 @@ All restraints require the selection parameter. This tells **drMD** what atoms t
 > :medical_symbol:
 >The selection method is shared between multiple different inputs in the **drMD** config file. This is described in more detail in the next section
 
+<a id="selection2restraints"></a>
+#### :anatomical_heart: selection2
+ *(dict)*  *Required for comDistanceWall restraints*. The second group of atoms. The wall acts on the distance between the mass-weighted centre of mass of
+**selection** and that of **selection2**; both may contain any number of atoms
 
 Example restraints syntax:
 ```yaml
@@ -649,12 +661,26 @@ Example restraints syntax:
       parameters:
         k: 1000
         r0: 3
+  ## one-sided wall keeping the end of an acyl chain (ligand S12) within 14 Angstroms of a pocket residue
+    - restraintType: "comDistanceWall"
+      selection:
+        keyword: "custom"
+        customSelection:
+          - {CHAIN_ID: "C", RES_NAME: "S12", RES_ID: 36, ATOM_NAME: [C10, C11, C12]}
+      selection2:
+        keyword: "custom"
+        customSelection:
+          - {CHAIN_ID: "A", RES_NAME: "THR", RES_ID: 54, ATOM_NAME: [CB, OG1, CG2]}
+      parameters:
+        k: 500
+        upper: 14
 
 ```
 
 This example will add the following restraints:
 - Position restraints to the protein atoms with a force constant of 1000 kJ/mol 
 - A 3 Angstrom distance restraint between the CA atoms of residues 1 and 2 of the protein, with a force constant of 1000 kJ/mol
+- A one-sided harmonic wall (force constant 500 kJ/mol) on the distance between the centre of mass of the last three carbons of the acyl chain and the centre of mass of the THR54 side chain, acting only beyond 14 Angstroms
 
 For a detailed explanation of how to select chains, residues, and atoms for restraints, see the [**drMD** Selection syntax](#drmd-selection-syntax) section.
 

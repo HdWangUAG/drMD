@@ -53,7 +53,7 @@ def restraints_handler(
         ## create a counter for naming restraint parameters
         kNumber: int = 0
         ## loop through restraints 
-        ## create position, distance, angle, and torsion restraints
+        ## create position, distance, angle, torsion restraints and centre-of-mass distance walls
         for restraint in restraintInfo:
             selection: List = restraint["selection"]
             parameters: Dict = restraint["parameters"]
@@ -69,6 +69,10 @@ def restraints_handler(
             ## add a torsion restraint
             elif restraint["restraintType"] == "torsion":
                 system: openmm.System = create_torsion_restraint(system, selection, parameters, kNumber, pdbFile)
+            ## add a one-sided wall on a centre-of-mass distance
+            elif restraint["restraintType"] == "comDistanceWall":
+                selection2: List = restraint["selection2"]
+                system: openmm.System = create_com_distance_wall(system, selection, selection2, parameters, kNumber, pdbFile)
             ## increment kNumber
             kNumber += 1
 
@@ -107,6 +111,14 @@ def inspect_restraints(system):
             for j in range(force.getNumTorsions()):
                 particleA, particleB, particleC, particleD, torsionParameters = force.getTorsionParameters(j)   
                 drLogger.log_info(f"Torsion {j}: particles ({particleA}, {particleB}, {particleC}, {particleD}), angle {round(torsionParameters[1] * 180 /math.pi, 2)} degrees, force constant {torsionParameters[0]}")      
+
+        elif isinstance(force, openmm.CustomCentroidBondForce):
+            ## centre-of-mass distance walls: the force constant is a global parameter, "upper" is per-bond
+            forceConstants = [f"{force.getGlobalParameterName(k)} = {force.getGlobalParameterDefaultValue(k)}" for k in range(force.getNumGlobalParameters())]
+            for j in range(force.getNumBonds()):
+                groupIndexes, bondParameters = force.getBondParameters(j)
+                groupSizes = [len(force.getGroupParameters(groupIndex)[0]) for groupIndex in groupIndexes]
+                drLogger.log_info(f"COM distance wall {j}: groups of {groupSizes[0]} and {groupSizes[1]} atoms, upper {bondParameters[0] * 10} Å, force constant {', '.join(forceConstants)}")
 ###########################################################################################
 def create_position_restraint(
     system: openmm.System,
@@ -269,6 +281,49 @@ def create_torsion_restraint(system: openmm.System, selection: list, parameters:
     
     return system
 
+###########################################################################################
+def create_com_distance_wall(system: openmm.System, selection: list, selection2: list, parameters: Dict, kNumber: int, pdbFile: FilePath) -> openmm.System:
+    """
+    Creates a one-sided (upper) harmonic wall on the distance between the mass-weighted
+    centres of mass of two groups of atoms. No force acts while the centre-of-mass distance
+    is below "upper"; above it the energy is 0.5 * k * (d - upper)^2.
+    Typical use: keeping a metadynamics COM_DISTANCE bias variable inside its grid.
+
+    Parameters:
+        system (openmm.System): The system to add the wall to.
+        selection (list): The selection dictionary for the first group of atoms.
+        selection2 (list): The selection dictionary for the second group of atoms.
+        parameters (dict): The parameters dictionary containing the force constant k (kJ mol^-1 nm^-2) and the upper distance (angstrom).
+        kNumber (int): The number used to identify the force constant parameter.
+        pdbFile (str): The path to the PDB file.
+
+    Returns:
+        openmm.System: The system with the centre-of-mass distance wall added.
+    """
+    ## create the wall object: step() switches the harmonic term on beyond the upper distance
+    comDistanceWall: openmm.CustomCentroidBondForce = openmm.CustomCentroidBondForce(2,
+                        f"0.5*k{str(kNumber)}*step(distance(g1,g2)-upper)*(distance(g1,g2)-upper)^2")
+    ## k is a global parameter (as for position restraints, clear_all_restraints and drGaMD rely on the k<N> name)
+    ## upper is a per-bond parameter, converted from angstrom to nanometers
+    kForceConstant: float = parameters["k"]
+    comDistanceWall.addGlobalParameter(f"k{str(kNumber)}", kForceConstant * unit.kilojoules_per_mole / unit.nanometer**2)
+    comDistanceWall.addPerBondParameter("upper")
+    upperDistance_nm: float = parameters["upper"] * unit.angstroms
+
+    ## use selections to get atom indexes for the two groups (mass-weighted centres of mass by default)
+    groupAtomIndexes: List[int] = drSelector.get_atom_indexes(selection, pdbFile)
+    groupAtomIndexes2: List[int] = drSelector.get_atom_indexes(selection2, pdbFile)
+    if len(groupAtomIndexes) == 0 or len(groupAtomIndexes2) == 0:
+        raise ValueError("Expected at least one atom in each of selection and selection2 for a comDistanceWall restraint.")
+    comDistanceWall.addGroup(groupAtomIndexes)
+    comDistanceWall.addGroup(groupAtomIndexes2)
+    ## one bond between the two groups
+    comDistanceWall.addBond([0, 1], [upperDistance_nm])
+
+    ## add force to system
+    system.addForce(comDistanceWall)
+
+    return system
 
 ###########################################################################################
 def clear_all_restraints(saveXml: FilePath) -> None:

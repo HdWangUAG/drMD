@@ -494,7 +494,7 @@ def check_restraintInfo(restraintInfo: dict, disorders: dict) -> Tuple[dict, boo
         return disorders, False
     
     ## check each entry in restraintInfo
-
+    disorders["restraintInfo"] = {}
     for restraintIndex, info in enumerate(restraintInfo):
         if not isinstance(info, dict):
             disorders["restraintInfo"][f"restraint_{restraintIndex}"] = "each entry in restraintInfo must be a dictionary (see README for syntax!)"
@@ -509,8 +509,8 @@ def check_restraintInfo(restraintInfo: dict, disorders: dict) -> Tuple[dict, boo
                 if not isinstance(restraintType, str):
                     disorders["restraintInfo"][f"restraint_{restraintIndex}"] = "each entry in restraintInfo['restraintType'] must be a string"
                     restraintInfofOk = False
-                if not restraintType in ["position", "distance", "angle", "torsion"]:
-                    disorders["restraintInfo"][f"restraint_{restraintIndex}"] = "each entry in restraintInfo['restraintType'] must be one of 'position', 'distance', 'angle', 'torsion'"
+                if not restraintType in ["position", "distance", "angle", "torsion", "comDistanceWall"]:
+                    disorders["restraintInfo"][f"restraint_{restraintIndex}"] = "each entry in restraintInfo['restraintType'] must be one of 'position', 'distance', 'angle', 'torsion', 'comDistanceWall'"
                     restraintInfofOk = False
             ## check selection for restraint to act upon
             restrantSelection = info.get("selection", None)
@@ -526,6 +526,21 @@ def check_restraintInfo(restraintInfo: dict, disorders: dict) -> Tuple[dict, boo
                     if len(selectionDisorder) > 0:
                         disorders["restraintInfo"][f"restraint_{restraintIndex}"] = selectionDisorder
                         restraintInfofOk = False
+            ## comDistanceWall restraints act between two groups of atoms, so need a second selection
+            if restraintType == "comDistanceWall":
+                restraintSelection2 = info.get("selection2", None)
+                if restraintSelection2 is None:
+                    disorders["restraintInfo"][f"restraint_{restraintIndex}"] = "comDistanceWall entries in restraintInfo must have a 'selection2' key"
+                    restraintInfofOk = False
+                else:
+                    if not isinstance(restraintSelection2, dict):
+                        disorders["restraintInfo"][f"restraint_{restraintIndex}"] = "each entry in restraintInfo['selection2'] must be a dictionary (see README for syntax!)"
+                        restraintInfofOk = False
+                    else:
+                        selection2Disorder = check_selection({"selection": restraintSelection2})
+                        if len(selection2Disorder) > 0:
+                            disorders["restraintInfo"][f"restraint_{restraintIndex}"] = selection2Disorder
+                            restraintInfofOk = False
             ## check parameters for restraint
             restraintParamers = info.get("parameters", None)
             if restraintParamers is None:
@@ -536,8 +551,7 @@ def check_restraintInfo(restraintInfo: dict, disorders: dict) -> Tuple[dict, boo
                 if len(restraintParamProblems) > 0:
                     disorders["restraintInfo"][f"restraint_{restraintIndex}"] = restraintParamProblems
                     restraintInfofOk = False
-                else:
-                    disorders["restraintInfo"] = {}
+                elif not f"restraint_{restraintIndex}" in disorders["restraintInfo"]:
                     disorders["restraintInfo"][f"restraint_{restraintIndex}"] = None
 
     return disorders, restraintInfofOk
@@ -833,6 +847,16 @@ def check_restraint_parameters(restraintType: str, parameters: dict) -> None:
                 parameterProblems.append("theta0 parameter must be a number for angle restraints")
             if theta0 < 0 or theta0 > 360:
                 parameterProblems.append("theta0 parameter must be between 0 and 360 for angle restraints")
+
+    elif restraintType.upper() == "COMDISTANCEWALL":
+        upper = parameters.get("upper", None)
+        if  upper is None:
+            parameterProblems.append("upper parameter must be provided for comDistanceWall restraints")
+        else:
+            if not isinstance(upper, (int, float)):
+                parameterProblems.append("upper parameter must be a number for comDistanceWall restraints")
+            elif upper <= 0:
+                parameterProblems.append("upper parameter must be positive for comDistanceWall restraints")
 
 
     return parameterProblems

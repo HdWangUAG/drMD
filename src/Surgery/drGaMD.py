@@ -215,11 +215,12 @@ def assign_force_groups(system: openmm.System, excludeRestraintsFromBoost: bool)
 def is_restraint_force(force: openmm.Force) -> bool:
     """
     Decides whether a force was added by drRestraints.
-    drRestraints only makes CustomExternalForce, CustomBondForce, CustomAngleForce and CustomTorsionForce
-    objects, each with a global parameter named k<N>.
+    drRestraints only makes CustomExternalForce, CustomBondForce, CustomAngleForce, CustomTorsionForce
+    and CustomCentroidBondForce (comDistanceWall) objects, each with a global parameter named k<N>.
     """
     if not isinstance(force, (openmm.CustomExternalForce, openmm.CustomBondForce,
-                              openmm.CustomAngleForce, openmm.CustomTorsionForce)):
+                              openmm.CustomAngleForce, openmm.CustomTorsionForce,
+                              openmm.CustomCentroidBondForce)):
         return False
     for i in range(force.getNumGlobalParameters()):
         if force.getGlobalParameterName(i).startswith("k"):

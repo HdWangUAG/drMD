@@ -458,6 +458,12 @@ def get_restraints_methods_text(sim: Dict) -> str:
     restraintInfo = sim["restraintInfo"]
     text = ""
     for restraint in restraintInfo:
+        ## one-sided walls on a centre-of-mass distance act between two groups of atoms
+        if restraint["restraintType"] == "comDistanceWall":
+            text += f"A one-sided harmonic wall with a force constant of {restraint['parameters']['k']} {get_force_constant_units(restraint['restraintType'])} "
+            text += f"was applied to the distance between the centres of mass of {selection_to_text(restraint['selection'])} "
+            text += f"and {selection_to_text(restraint['selection2'])},{get_restraint_target(restraint)}. "
+            continue
         text += f"{inflecter.a(restraint['restraintType']).capitalize()} restraint"
         text += f" with a force constant of {restraint['parameters']['k']} {get_force_constant_units(restraint['restraintType'])} "
         text += f" {get_restraint_target(restraint)} "
@@ -484,6 +490,8 @@ def get_force_constant_units(restraintType: str) -> str:
         return "kJ mol<sup>-1</sup> rad<sup>-2</sup>"
     elif restraintType == "torsion":
         return "kJ mol<sup>-1</sup> rad<sup>-2</sup>"
+    elif restraintType == "comDistanceWall":
+        return "kJ mol<sup>-1</sup> nm<sup>-2</sup>"
 ##########################################################################################
 def selection_to_text(selection: Dict) -> str:
     """
@@ -567,6 +575,8 @@ def get_restraint_target(restraint: str) -> str:
         return f" and an equilibrium angle of {restraint['parameters']['theta0']} degrees"    
     elif restraintType == "torsion":
         return f" and an equilibrium dihedral angle of {restraint['parameters']['phi0']} degrees"
+    elif restraintType == "comDistanceWall":
+        return f" acting only beyond {restraint['parameters']['upper']} Å"
 
 ##########################################################################################
 def identifier_list_to_str(identifier: Union[str, list]) -> str:
