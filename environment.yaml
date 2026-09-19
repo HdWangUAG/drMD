@@ -9,6 +9,10 @@ dependencies:
   - openmm=8.2.*
   - cuda-version=12.4
   - openbabel
+  # mdtraj / mdanalysis from conda-forge so that they share the environment's OpenMP runtime
+  # (the PyPI wheels bundle their own libgomp)
+  - mdtraj
+  - mdanalysis
   - pango
   - pip
   - pip:
