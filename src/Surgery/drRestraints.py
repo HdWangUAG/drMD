@@ -308,7 +308,7 @@ def create_com_distance_wall(system: openmm.System, selection: list, selection2:
     kForceConstant: float = parameters["k"]
     comDistanceWall.addGlobalParameter(f"k{str(kNumber)}", kForceConstant * unit.kilojoules_per_mole / unit.nanometer**2)
     comDistanceWall.addPerBondParameter("upper")
-    upperDistance_nm: float = parameters["upper"] * unit.angstroms
+    upperDistance_nm: float = (parameters["upper"] * unit.angstroms).value_in_unit(unit.nanometers)
 
     ## use selections to get atom indexes for the two groups (mass-weighted centres of mass by default)
     groupAtomIndexes: List[int] = drSelector.get_atom_indexes(selection, pdbFile)
