@@ -164,18 +164,13 @@ def fix_merged_vitals(vitalsDf: pd.DataFrame, simInfo: Dict) -> pd.DataFrame:
     logInterval: int = simInfo["logInterval"]
     timeStep: openmm.Quantity = simInfo["timestep"]
     duration: openmm.Quantity = simInfo["duration"]
-    ## convert to ints 
-    logInterval_ps = int(logInterval * timeStep.value_in_unit(unit.picoseconds))
-    duration_ps: int = round(duration.value_in_unit(unit.picoseconds))
-
-    ## construct time range
-    timeRange_ps = range(logInterval_ps, duration_ps + logInterval_ps, logInterval_ps)
-
-    ## construct step range
-    stepsRange = [val * logInterval for val in timeRange_ps]    
-
-    vitalsDf['Time (ps)'] = timeRange_ps
-    vitalsDf['#"Step"'] = stepsRange
+    ## each segment restarted its step counter, so renumber time and step continuously over the
+    ## merged rows. The number of rows is taken from the merged report itself: a resumed step
+    ## re-runs from its last checkpoint, so it can hold more rows than duration / logInterval.
+    logInterval_ps: float = logInterval * timeStep.value_in_unit(unit.picoseconds)
+    nRows: int = len(vitalsDf)
+    vitalsDf['Time (ps)'] = [(row + 1) * logInterval_ps for row in range(nRows)]
+    vitalsDf['#"Step"'] = [(row + 1) * logInterval for row in range(nRows)]
     return vitalsDf
 #######################################################################
 
