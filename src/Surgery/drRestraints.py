@@ -1,6 +1,7 @@
 ## BASIC PYTHON LIBRARIES
-import xml.etree.ElementTree as ET
+import os
 from os import path as p
+import re
 import math
 
 ## OPENMM LIBRARIES
@@ -272,7 +273,11 @@ def create_torsion_restraint(system: openmm.System, selection: list, parameters:
 ###########################################################################################
 def clear_all_restraints(saveXml: FilePath) -> None:
     """
-    Remove all custom force constants from the given XML file.
+    Remove all custom force constants from the given state XML file.
+    drMD's restraint forces are the only ones whose global parameters start with "k", so those
+    attributes are stripped from the <Parameters .../> element. The file is rewritten through a
+    temporary file and an atomic replace, so an interrupted or failed rewrite can never leave the
+    only copy of a simulation state truncated.
 
     Parameters:
         saveXml (str): The path to the XML file.
@@ -280,24 +285,20 @@ def clear_all_restraints(saveXml: FilePath) -> None:
     Returns:
         None
     """
+    with open(saveXml, "r") as f:
+        xmlText: str = f.read()
 
-    # Parse the XML file
-    tree: ET.ElementTree = ET.parse(saveXml)
-    root: ET.Element = tree.getroot()
-    ## get the parameters section of the XML file
-    parametersElement: ET.Element = root.find("Parameters")
+    ## NB. our custom restraints are the only ones that use "k"
+    def strip_restraint_parameters(match: "re.Match") -> str:
+        return re.sub(r'\s+k\d+="[^"]*"', "", match.group(0))
 
-    # Safely remove any custom force constants
-    ## NB. our custom restrants are the only ones that use "k"
-    paramsToPop: list = []
-    if parametersElement is not None:
-        for param in parametersElement.attrib:
-            if param.startswith("k"):
-                paramsToPop.append(param)
-    for param in paramsToPop:
-        parametersElement.attrib.pop(param)
+    newXmlText: str = re.sub(r"<Parameters\b[^>]*/?>", strip_restraint_parameters, xmlText, count=1)
+    if newXmlText == xmlText:
+        return
 
-    # Write the modified XML file
-    tree.write(saveXml)
+    tempXml: FilePath = saveXml + ".tmp"
+    with open(tempXml, "w") as f:
+        f.write(newXmlText)
+    os.replace(tempXml, saveXml)
     
 ###########################################################################################
