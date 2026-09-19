@@ -163,8 +163,10 @@ def run_gamd(prmtop: app.AmberPrmtopFile,
             gamdState = read_statistics_from_integrator(integrator, gamdState)
             gamdState = update_boost_parameters(gamdState, gamdInfo)
             apply_parameters_to_integrator(integrator, gamdState)
-            reset_window_statistics(integrator)
             write_parameters_row(parametersCsv, nStepsDone, gamdState)
+            ## start a fresh window, except after the last chunk so the json keeps the last window's statistics
+            if stepsRemaining > 0:
+                reset_window_statistics(integrator)
     gamdState = read_statistics_from_integrator(integrator, gamdState)
     gamdState["stepsCompleted"] = nStepsDone
     write_gamd_json(gamdJson, gamdState)
