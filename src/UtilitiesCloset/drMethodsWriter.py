@@ -570,13 +570,30 @@ def get_restraint_target(restraint: str) -> str:
     if restraintType == "position":
         return " "
     elif restraintType == "distance":
-        return f" and an equilibrium distance of {restraint['parameters']['r0']} Å"
+        return f" and an equilibrium distance of {restraint['parameters']['r0']} Å{get_flat_bottom_text(restraint, 'Å')}"
     elif restraintType == "angle":
         return f" and an equilibrium angle of {restraint['parameters']['theta0']} degrees"    
     elif restraintType == "torsion":
-        return f" and an equilibrium dihedral angle of {restraint['parameters']['phi0']} degrees"
+        return f" and an equilibrium dihedral angle of {restraint['parameters']['phi0']} degrees{get_flat_bottom_text(restraint, 'degrees')}"
     elif restraintType == "comDistanceWall":
         return f" acting only beyond {restraint['parameters']['upper']} Å"
+
+##########################################################################################
+def get_flat_bottom_text(restraint: Dict, units: str) -> str:
+    """
+    Generates the methods text for the flat bottom of a distance or torsion restraint.
+
+    Args:
+        restraint: (dict) Restraint dictionary
+        units: (str) Units of the half-width, matching those of the restraint target
+
+    Returns:
+        text: (str) methods text for the flat bottom, empty if the restraint has none
+    """
+    halfWidth = restraint["parameters"].get("halfWidth", 0)
+    if not halfWidth:
+        return ""
+    return f", flat-bottomed so that no force was applied within {halfWidth} {units} of the target"
 
 ##########################################################################################
 def identifier_list_to_str(identifier: Union[str, list]) -> str:

@@ -848,7 +848,20 @@ def check_restraint_parameters(restraintType: str, parameters: dict) -> None:
             if theta0 < 0 or theta0 > 360:
                 parameterProblems.append("theta0 parameter must be between 0 and 360 for angle restraints")
 
-    elif restraintType.upper() == "COMDISTANCEWALL":
+    ## an optional flat bottom is allowed on distance and torsion restraints
+    if restraintType.upper() in ["DISTANCE", "TORSION"]:
+        halfWidth = parameters.get("halfWidth", None)
+        if halfWidth is not None:
+            if not isinstance(halfWidth, (int, float)):
+                parameterProblems.append("halfWidth parameter must be a number")
+            elif halfWidth < 0:
+                parameterProblems.append("halfWidth parameter must not be negative")
+            elif restraintType.upper() == "TORSION" and halfWidth >= 180:
+                parameterProblems.append("halfWidth parameter must be less than 180 for torsion restraints")
+    elif parameters.get("halfWidth", None) is not None:
+        parameterProblems.append(f"halfWidth parameter is only supported for distance and torsion restraints, not {restraintType}")
+
+    if restraintType.upper() == "COMDISTANCEWALL":
         upper = parameters.get("upper", None)
         if  upper is None:
             parameterProblems.append("upper parameter must be provided for comDistanceWall restraints")

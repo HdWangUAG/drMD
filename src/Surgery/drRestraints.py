@@ -175,11 +175,21 @@ def create_distance_restraint(system: openmm.System, selection: list, parameters
         openmm.System: The system with the distance restraint added.
     """
 
+    ## an optional flat bottom makes the restraint a tolerance rather than a target:
+    ## no force is applied while r is within halfWidth of r0
+    halfWidth: float = parameters.get("halfWidth", 0)
+    if halfWidth > 0:
+        energyExpression: str = f"0.5 * k{str(kNumber)} * deviation^2; deviation = max(0, abs(r - r0) - halfWidth)"
+    else:
+        energyExpression: str = f"0.5 * k{str(kNumber)} * (r - r0)^2"
+
     # Create the distance restraint object
-    distanceRestraint: openmm.CustomBondForce = openmm.CustomBondForce(f"0.5 * k{str(kNumber)} * (r - r0)^2")
+    distanceRestraint: openmm.CustomBondForce = openmm.CustomBondForce(energyExpression)
     ## add per bond parameters, k for force constant, r0 for desired distance
     distanceRestraint.addPerBondParameter(f"k{str(kNumber)}")
     distanceRestraint.addPerBondParameter("r0")
+    if halfWidth > 0:
+        distanceRestraint.addPerBondParameter("halfWidth")
 
     # Get the indices of the two atoms to be restrained
     restraintAtomIndexes: List[int] = drSelector.get_atom_indexes(selection, pdbFile)
@@ -191,7 +201,10 @@ def create_distance_restraint(system: openmm.System, selection: list, parameters
     targetDistance_nm: float = parameters["r0"] * unit.angstroms 
 
     # Add the atom pair and the calculated target distance in nanometers to the bond restraint
-    distanceRestraint.addBond(restraintAtomIndexes[0], restraintAtomIndexes[1], [kForceConstant, targetDistance_nm])
+    bondParameters: List = [kForceConstant, targetDistance_nm]
+    if halfWidth > 0:
+        bondParameters.append(halfWidth * unit.angstroms)
+    distanceRestraint.addBond(restraintAtomIndexes[0], restraintAtomIndexes[1], bondParameters)
 
     ## add force to system
     system.addForce(distanceRestraint)
@@ -255,12 +268,25 @@ def create_torsion_restraint(system: openmm.System, selection: list, parameters:
     Returns:
         openmm.System: The system with the torsion restraint added.
     """
-    ## create the torsion restraint object  
-    torsionRestraint: openmm.CustomTorsionForce = openmm.CustomTorsionForce(f"0.5*k{str(kNumber)}*(1-cos(theta-theta0))")
+    ## an optional flat bottom makes the restraint a tolerance rather than a target: no force
+    ## is applied while theta is within halfWidth of theta0. The deviation is wrapped into
+    ## (-180, 180] so the well stays periodic, which the (1-cos) form gets for free.
+    halfWidth: float = parameters.get("halfWidth", 0)
+    if halfWidth > 0:
+        energyExpression: str = (f"0.5*k{str(kNumber)}*deviation^2"
+                                 "; deviation = max(0, abs(dTheta) - halfWidth)"
+                                 "; dTheta = theta - theta0 - 6.283185307179586*floor((theta - theta0 + 3.141592653589793)/6.283185307179586)")
+    else:
+        energyExpression: str = f"0.5*k{str(kNumber)}*(1-cos(theta-theta0))"
+
+    ## create the torsion restraint object
+    torsionRestraint: openmm.CustomTorsionForce = openmm.CustomTorsionForce(energyExpression)
     
     ## Add parameters: k for force constant, phi0 for desired torsion angle
     torsionRestraint.addPerTorsionParameter(f"k{str(kNumber)}")
     torsionRestraint.addPerTorsionParameter("theta0")
+    if halfWidth > 0:
+        torsionRestraint.addPerTorsionParameter("halfWidth")
     
     ## Add force to system
     system.addForce(torsionRestraint)
@@ -275,9 +301,12 @@ def create_torsion_restraint(system: openmm.System, selection: list, parameters:
     targetTorsion_degrees: float = parameters["phi0"] * unit.degrees
     
     ## Add the atom quartet and settings to the torsion restraint
+    torsionParameters: list = [kForceConstant, targetTorsion_degrees]
+    if halfWidth > 0:
+        torsionParameters.append(halfWidth * unit.degrees)
     torsionRestraint.addTorsion(restraintTorsionAtoms[0], restraintTorsionAtoms[1],
                                 restraintTorsionAtoms[2], restraintTorsionAtoms[3],
-                                [kForceConstant, targetTorsion_degrees])
+                                torsionParameters)
     
     return system
 

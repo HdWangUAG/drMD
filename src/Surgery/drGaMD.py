@@ -3,6 +3,7 @@ import os
 from os import path as p
 import json
 import math
+import re
 
 ## OPENMM LIBRARIES
 import openmm.app as app
@@ -216,16 +217,22 @@ def is_restraint_force(force: openmm.Force) -> bool:
     """
     Decides whether a force was added by drRestraints.
     drRestraints only makes CustomExternalForce, CustomBondForce, CustomAngleForce, CustomTorsionForce
-    and CustomCentroidBondForce (comDistanceWall) objects, each with a global parameter named k<N>.
+    and CustomCentroidBondForce (comDistanceWall) objects, each carrying a force constant named k<N>.
+    Position restraints and comDistanceWalls hold it as a global parameter, while distance, angle and
+    torsion restraints hold it per bond / angle / torsion, so both have to be inspected.
     """
     if not isinstance(force, (openmm.CustomExternalForce, openmm.CustomBondForce,
                               openmm.CustomAngleForce, openmm.CustomTorsionForce,
                               openmm.CustomCentroidBondForce)):
         return False
-    for i in range(force.getNumGlobalParameters()):
-        if force.getGlobalParameterName(i).startswith("k"):
-            return True
-    return False
+    parameterNames: List[str] = [force.getGlobalParameterName(i) for i in range(force.getNumGlobalParameters())]
+    for countMethod, nameMethod in [("getNumPerParticleParameters", "getPerParticleParameterName"),
+                                    ("getNumPerBondParameters", "getPerBondParameterName"),
+                                    ("getNumPerAngleParameters", "getPerAngleParameterName"),
+                                    ("getNumPerTorsionParameters", "getPerTorsionParameterName")]:
+        if hasattr(force, countMethod):
+            parameterNames.extend(getattr(force, nameMethod)(i) for i in range(getattr(force, countMethod)()))
+    return any(re.fullmatch(r"k\d*", parameterName) for parameterName in parameterNames)
 ########################################################################################################
 def add_cv_monitor_force(system: openmm.System,
                           gamdInfo: Dict,
