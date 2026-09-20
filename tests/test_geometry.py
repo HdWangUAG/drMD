@@ -327,3 +327,46 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all drGeometry tests passed")
+
+
+def test_torsion_matches_mdtraj_and_wraps():
+    """The torsion type must agree with mdtraj's dihedral, in the same sign convention."""
+    chainId, number = RESIDUES[1]                      ## ALA of the alanine dipeptide
+    quartet = [{"chain": chainId, "resId": number, "atom": name} for name in ("N", "CA", "CB", "HB1")]
+    measurement = dict(zip(("a", "b", "c", "d"), quartet), name="chi1-like", type="torsion")
+    values = drGeometry.measure(TRAJ, TOP, LABELS, measurement)
+    indices = np.array([[drGeometry.select_atoms(TOP, LABELS, spec)[0] for spec in quartet]])
+    expected = np.degrees(md.compute_dihedrals(TRAJ, indices)).ravel()
+    assert np.allclose(values, expected, atol=1e-3), (values, expected)
+    assert -180.0 < values[0] <= 180.0
+
+
+def test_torsion_needs_four_selections():
+    chainId, number = RESIDUES[1]
+    measurement = {"name": "short", "type": "torsion",
+                   "a": {"chain": chainId, "resId": number, "atom": "N"},
+                   "b": {"chain": chainId, "resId": number, "atom": "CA"},
+                   "c": {"chain": chainId, "resId": number, "atom": "CB"}}
+    try:
+        drGeometry.measure(TRAJ, TOP, LABELS, measurement)
+    except ValueError as error:
+        assert "'a', 'b', 'c' and 'd'" in str(error), error
+    else:
+        raise AssertionError("a three-atom torsion should be refused")
+
+
+def test_circular_statistics_handle_the_wrap():
+    """A series straddling 180 degrees must not average to zero."""
+    import pandas as pd
+    values = np.array([179.0, -179.0, 178.0, -178.0])
+    mean, spread = drGeometry.circular_statistics(values)
+    assert abs(abs(mean) - 179.5) < 0.6, mean
+    assert spread < 2.0, spread
+    series = pd.DataFrame({"frame": np.arange(4), "wrapping": values})
+    summary = drGeometry.summarise(series, [3.5], circularNames=["wrapping"])
+    row = summary.iloc[0]
+    assert abs(row["max"] - row["min"]) < 4.0, dict(row)      ## a 2 degree spread, not a 358 degree one
+    assert np.isnan(row["frac_lt_3.5"])
+    ## a linear series is untouched
+    linear = pd.DataFrame({"frame": np.arange(3), "distance": np.array([3.0, 4.0, 5.0])})
+    assert drGeometry.summarise(linear, [3.5]).iloc[0]["mean"] == 4.0

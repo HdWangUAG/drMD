@@ -35,6 +35,12 @@ A measurement file is YAML (or JSON):
         type: comDistance
         a: {chain: C, resId: 36, atoms: [C10, C11, C12]}
         b: {chain: A, resIds: [137, 140, 141, 146, 189, 199], atoms: sidechain}
+      - name: His285_chi1
+        type: torsion
+        a: {chain: A, resId: 285, atom: N}
+        b: {chain: A, resId: 285, atom: CA}
+        c: {chain: A, resId: 285, atom: CB}
+        d: {chain: A, resId: 285, atom: CG}
       - name: thioester-His285
         type: angle
         a: {chain: C, resId: 36, atom: O1}
@@ -319,7 +325,7 @@ def measure(traj, topology, labels, measurement: dict, massWeighted: bool = True
     """Return the measurement for every frame, in Angstrom (distances), degrees (angles) or a count."""
     kind = measurement.get("type", "distance")
     groups = []
-    for key in ("a", "b", "c"):
+    for key in ("a", "b", "c", "d"):
         if key in measurement:
             indices = select_atoms(topology, labels, measurement[key])
             masses = np.array([topology.atom(i).element.mass for i in indices]) if massWeighted else None
@@ -341,19 +347,52 @@ def measure(traj, topology, labels, measurement: dict, massWeighted: bool = True
         v1, v2 = groups[0] - groups[1], groups[2] - groups[1]
         cosine = (v1 * v2).sum(-1) / (np.linalg.norm(v1, axis=-1) * np.linalg.norm(v2, axis=-1))
         return np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    if kind == "torsion":
+        if len(groups) != 4:
+            raise ValueError(f"{measurement.get('name')}: a torsion needs selections 'a', 'b', 'c' and 'd', "
+                             f"in the order the dihedral runs")
+        ## IUPAC sign convention, the same one the restraint in drRestraints uses, in (-180, 180]
+        b0, axis, b2 = groups[0] - groups[1], groups[2] - groups[1], groups[3] - groups[2]
+        axis = axis / np.linalg.norm(axis, axis=-1, keepdims=True)
+        v = b0 - (b0 * axis).sum(-1, keepdims=True) * axis
+        w = b2 - (b2 * axis).sum(-1, keepdims=True) * axis
+        return np.degrees(np.arctan2((np.cross(axis, v) * w).sum(-1), (v * w).sum(-1)))
     raise ValueError(f"unknown measurement type '{kind}'")
 
 
-def summarise(series: pd.DataFrame, cutoffs: Sequence[float]) -> pd.DataFrame:
+def circular_statistics(degrees: np.ndarray) -> Tuple[float, float]:
+    """Mean and spread of an angular series, so that -179 and +179 are two degrees apart.
+
+    The mean is the direction of the resultant vector, and the spread is the circular standard
+    deviation sqrt(-2 ln R), which tends to the ordinary standard deviation for a tight cluster.
+    """
+    radians = np.radians(degrees)
+    resultant = np.hypot(np.sin(radians).mean(), np.cos(radians).mean())
+    mean = np.degrees(np.arctan2(np.sin(radians).mean(), np.cos(radians).mean()))
+    spread = np.degrees(np.sqrt(-2.0 * np.log(resultant))) if resultant > 0 else float("nan")
+    return float(mean), float(spread)
+
+
+def summarise(series: pd.DataFrame, cutoffs: Sequence[float],
+              circularNames: Sequence[str] = ()) -> pd.DataFrame:
     rows = []
     for name in series.columns:
         if name in ("frame", "timeNs"):
             continue
         values = series[name].to_numpy()
-        row = {"name": name, "mean": values.mean(), "sd": values.std(), "min": values.min(), "max": values.max(),
-               "p5": np.percentile(values, 5), "p95": np.percentile(values, 95)}
+        if name in circularNames:
+            ## torsions wrap, so a linear mean of a series straddling 180 degrees is meaningless.
+            ## min, max and the percentiles are reported about the circular mean for the same reason.
+            mean, spread = circular_statistics(values)
+            centred = (values - mean + 180) % 360 - 180
+            row = {"name": name, "mean": mean, "sd": spread,
+                   "min": mean + centred.min(), "max": mean + centred.max(),
+                   "p5": mean + np.percentile(centred, 5), "p95": mean + np.percentile(centred, 95)}
+        else:
+            row = {"name": name, "mean": values.mean(), "sd": values.std(), "min": values.min(),
+                   "max": values.max(), "p5": np.percentile(values, 5), "p95": np.percentile(values, 95)}
         for cutoff in cutoffs:
-            row[f"frac_lt_{cutoff:g}"] = float((values < cutoff).mean())
+            row[f"frac_lt_{cutoff:g}"] = float("nan") if name in circularNames else float((values < cutoff).mean())
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -362,16 +401,17 @@ def summary_markdown(summary: pd.DataFrame, nFrames: int, cutoffs: Sequence[floa
     cutoffColumns = [f"frac_lt_{c:g}" for c in cutoffs]
     header = "| measurement | mean | sd | min | max | " + " | ".join(cutoffColumns) + " |\n"
     header += "|---|---|---|---|---|" + "---|" * len(cutoffColumns) + "\n"
-    lines = [f"Geometry over {nFrames} frames (distances in Å, angles in degrees, solventBridge in waters).\n\n", header]
+    lines = [f"Geometry over {nFrames} frames (distances in Å, angles and torsions in degrees, "
+             f"solventBridge in waters; torsions use circular statistics).\n\n", header]
     for _, r in summary.iterrows():
-        cells = " | ".join(f"{r[c]:.2f}" for c in cutoffColumns)
+        cells = " | ".join("-" if pd.isna(r[c]) else f"{r[c]:.2f}" for c in cutoffColumns)
         lines.append(f"| {r['name']} | {r['mean']:.2f} | {r['sd']:.2f} | {r['min']:.2f} | {r['max']:.2f} | {cells} |\n")
     return "".join(lines)
 
 
 ########################################################################################################
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Measure distances, COM distances, angles and water bridges over a drMD trajectory.")
+    parser = argparse.ArgumentParser(description="Measure distances, COM distances, angles, torsions and water bridges over a drMD trajectory.")
     parser.add_argument("--pdb", required=True, help="topology PDB")
     parser.add_argument("--trajectory", default=None, help="DCD trajectory; omit to measure the PDB alone")
     parser.add_argument("--measurements", required=True, help="YAML/JSON file describing the measurements")
@@ -436,7 +476,8 @@ def main() -> None:
 
     os.makedirs(args.outDir, exist_ok=True)
     series.to_csv(p.join(args.outDir, "geometry_series.csv"), index=False)
-    summary = summarise(series, args.cutoffs)
+    torsionNames = [m["name"] for m in measurements if m.get("type") == "torsion"]
+    summary = summarise(series, args.cutoffs, circularNames=torsionNames)
     summary.to_csv(p.join(args.outDir, "geometry_summary.csv"), index=False)
     with open(p.join(args.outDir, "geometry_summary.md"), "w") as fh:
         fh.write(summary_markdown(summary, nFrames, args.cutoffs))
