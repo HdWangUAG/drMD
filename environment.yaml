@@ -13,6 +13,8 @@ dependencies:
   # (the PyPI wheels bundle their own libgomp)
   - mdtraj
   - mdanalysis
+  # interaction profiling (src/ExaminationRoom/drPLIP.py)
+  - plip
   - pango
   - pip
   - pip:

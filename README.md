@@ -19,7 +19,8 @@ Automated workflow for running molecular dynamics simulations with Amber and Ope
 5. **Adding Restraints in drMD**: [restraintInfo](#restraintinfo) | [restraintType](#restrainttype) | [parameters](#parameters)
 6. **Running Metadynamics with drMD**: [metaDynamicsInfo](#metadynamicsinfo) | [height](#height) | [biasFactor](#biasfactor) | [frequency](#frequency) | [saveFrequency](#savefrequency) | [biasDir](#biasdir) | [freeEnergyInterval](#freeenergyinterval) | [biases](#biases) | [outputs](#metadynamicsoutputs)
 7. **Running Gaussian accelerated MD (GaMD) with drMD**: [gamdInfo](#gamdinfo) | [stage](#gamdstage) | [boostType](#boosttype) | [thresholdMode](#thresholdmode) | [sigma0P / sigma0D](#sigma0) | [updateInterval](#updateinterval) | [excludeRestraintsFromBoost](#excluderestraintsfromboost) | [ensemble](#gamdensemble) | [cvs](#gamdcvs) | [outputs](#gamdoutputs) | [reweighting](#reweighting)
-8. **Worked Examples**
+8. **Interaction profiling with PLIP**: [drPLIP](#plip)
+9. **Worked Examples**
     - [Example 1: MD Simulation of a Protein](#worked-example-1)
     - [Example 2: Restrained MD of Protein-Ligand Complex](#worked-example-2)
     - [Example 3: Energy Minimisation of Structures](#worked-example-3)
@@ -1026,6 +1027,67 @@ in that summary decide whether a profile is usable, and both are printed:
 
 > :medical_symbol:
 > Like metadynamics, GaMD gives free energies. It does not give rate constants.
+
+---
+
+<a id="plip"></a>
+## :medical_symbol: Interaction profiling with PLIP :medical_symbol:
+
+`src/ExaminationRoom/drPLIP.py` runs [PLIP](https://github.com/pharmai/plip) over a finished trajectory and turns it into
+interaction *frequencies*: which residue makes which kind of contact, in what fraction of the frames. It answers the
+"what is actually holding the ligand / the interface together" question that distance plots alone do not.
+
+Two views are produced for every frame:
+
+| view | what is the "ligand" | what you get |
+|---|---|---|
+| `ligand` | each residue named in `--ligandResidues` (a HETATM ligand, or a modified/non-canonical residue such as an acyl-Ppant-Ser) | hydrophobic contacts, hydrogen bonds, salt bridges, pi-stacking, pi-cation, halogen bonds and metal coordination with every other residue |
+| `peptide` | each chain named in `--peptideChains` | the same interaction types across a protein-protein interface |
+
+```bash
+python src/ExaminationRoom/drPLIP.py \
+    --pdb  outputs/prot/07_NPT_production/trajectory.pdb \
+    --trajectory outputs/prot/07_NPT_production/trajectory.dcd \
+    --stride 10 --frameTimeNs 0.2 \
+    --ligandResidues S12 --peptideChains C D \
+    --chainMap "A:1-299:83,B:300-598:83,C:599-675:0,D:676-752:0" \
+    --label WT_C12 --minFraction 0.1 --outDir plip
+```
+
+### :anatomical_heart: arguments
+- **--pdb** / **--trajectory**: topology and (optionally) a DCD. Without a trajectory the PDB alone is profiled, which is
+  how a docked pose, a starting structure or a co-folding model is compared with the simulation.
+- **--ligandResidues**: residue names to treat as ligands. They are written as HETATM and PLIP is run in `KEEPMOD` mode,
+  so a *covalently attached* modified residue is profiled as a ligand as well.
+- **--peptideChains**: chain IDs to treat as peptide ligands for the protein-protein view. Omit for a plain ligand run.
+- **--chainMap**: `chainId:firstResidue-lastResidue:numberingOffset,...` restores chain IDs and residue numbering that
+  drMD's merged topology has lost (drMD writes one chain; `trajectory.pdb` renumbers continuously). The offset is added
+  to the position within the chain, so `A:1-299:83` writes the first residue as `A 84`.
+- **--minFraction**: interactions seen in fewer than this fraction of frames are left out of the summary (the full list
+  is always in `plip_interactions.csv`).
+
+### :anatomical_heart: outputs
+- `plip_interactions.csv` — one row per interaction per frame: frame, time, view, interaction type, partner residue,
+  ligand residue, **ligand atom and atom group**, distance, donor-acceptor distance and angle.
+- `plip_summary.csv` / `plip_summary.md` — per (partner residue, ligand group, interaction type): the fraction of frames
+  in which it is present, and mean/minimum distance. An interaction seen through several atoms in one frame counts once.
+- `frames/` — the PDB frames handed to PLIP, for inspection in PyMOL.
+- `plip_run.json` — the arguments, for provenance.
+
+For an acyl-Ppant-Ser residue (`S<n>`, e.g. `S12`, `S14`) the ligand atoms are split into chemically meaningful groups —
+`ser`, `phosphate`, `pant`, `thioester`, `acyl` and `tail` (the last three carbons) — so the summary separates
+"the phosphate is held by an arginine" from "the tail sits in the hydrophobic pocket". A ligand with no atom-name
+convention (a co-folding model, for instance) is classified by walking its bond graph instead.
+
+> :medical_symbol:
+> PLIP re-protonates the structure with Open Babel, so the hydrogens of the MD topology are **stripped** before profiling.
+> Hydrogen-bond assignments therefore follow Open Babel's protonation, not the tautomer that was simulated (an important
+> caveat for a catalytic histidine). Use the interaction *frequencies* qualitatively, and measure distances and angles
+> that depend on a specific tautomer directly from the trajectory.
+
+> :medical_symbol:
+> Solvent is not written, so PLIP water bridges cannot be detected. Pass `--keepSolvent` if you want water in the frames,
+> but note that PLIP then treats every water as a possible ligand.
 
 ---
 
