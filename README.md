@@ -19,7 +19,7 @@ Automated workflow for running molecular dynamics simulations with Amber and Ope
 5. **Adding Restraints in drMD**: [restraintInfo](#restraintinfo) | [restraintType](#restrainttype) | [parameters](#parameters)
 6. **Running Metadynamics with drMD**: [metaDynamicsInfo](#metadynamicsinfo) | [height](#height) | [biasFactor](#biasfactor) | [frequency](#frequency) | [saveFrequency](#savefrequency) | [biasDir](#biasdir) | [freeEnergyInterval](#freeenergyinterval) | [biases](#biases) | [outputs](#metadynamicsoutputs)
 7. **Running Gaussian accelerated MD (GaMD) with drMD**: [gamdInfo](#gamdinfo) | [stage](#gamdstage) | [boostType](#boosttype) | [thresholdMode](#thresholdmode) | [sigma0P / sigma0D](#sigma0) | [updateInterval](#updateinterval) | [excludeRestraintsFromBoost](#excluderestraintsfromboost) | [ensemble](#gamdensemble) | [cvs](#gamdcvs) | [outputs](#gamdoutputs) | [reweighting](#reweighting)
-8. **Interaction profiling with PLIP**: [drPLIP](#plip)
+8. **Trajectory analysis**: [drPLIP: interaction profiling](#plip) | [drGeometry: distances and angles](#geometry)
 9. **Worked Examples**
     - [Example 1: MD Simulation of a Protein](#worked-example-1)
     - [Example 2: Restrained MD of Protein-Ligand Complex](#worked-example-2)
@@ -1088,6 +1088,57 @@ convention (a co-folding model, for instance) is classified by walking its bond 
 > :medical_symbol:
 > Solvent is not written, so PLIP water bridges cannot be detected. Pass `--keepSolvent` if you want water in the frames,
 > but note that PLIP then treats every water as a possible ligand.
+
+---
+
+<a id="geometry"></a>
+## :medical_symbol: Geometric observables with **drGeometry** :medical_symbol:
+
+`src/ExaminationRoom/drGeometry.py` measures distances, centre-of-mass distances and angles over a finished trajectory,
+using the topology that was actually simulated. It is the counterpart of [drPLIP](#plip): PLIP tells you *which*
+interactions are present, drGeometry tells you *how far apart* a chosen pair of atoms or groups is in every frame —
+with the hydrogens and tautomers of the simulation, which PLIP's re-protonation discards.
+
+The same quantities define metadynamics collective variables, so a measurement file also documents the range a CV
+actually explores in unbiased MD, which is what a **biasVar** min/max and a [comDistanceWall](#comdistancewall) should be
+chosen from.
+
+```bash
+python src/ExaminationRoom/drGeometry.py \
+    --pdb outputs/prot/07_NPT_production/trajectory.pdb \
+    --trajectory outputs/prot/07_NPT_production/trajectory.dcd \
+    --measurements measurements.yaml --frameTimeNs 0.2 \
+    --cutoffs 3.5 4.0 --outDir geometry
+```
+
+### :anatomical_heart: the measurement file
+```yaml
+chainMap: "A:1-299:83,B:300-598:83,C:599-675:0,D:676-752:0"
+measurements:
+  - {name: C1-His285_NE2, type: distance,
+     a: {chain: A, resId: 285, atom: NE2}, b: {chain: C, resId: 36, atom: C1}}
+  - name: tail-pocketBottom
+    type: comDistance
+    a: {chain: C, resId: 36, atoms: [C10, C11, C12]}
+    b: {chain: A, resIds: [137, 140, 141, 146, 189, 199], atoms: sidechain}
+  - {name: attackAngle, type: angle,
+     a: {chain: A, resId: 285, atom: NE2}, b: {chain: C, resId: 36, atom: C1}, c: {chain: C, resId: 36, atom: O1}}
+```
+- **type**: `distance` (one atom per selection), `comDistance` (centroids of two groups) or `angle` (`b` is the vertex).
+- **selections**: `chain` plus `resId` or `resIds`, and either `atom` / `atoms: [names]`, or a class —
+  `sidechain`, `heavy`, `backbone` or `all`.
+- **chainMap**: `chainId:firstResidue-lastResidue:numberingOffset,...`, exactly as in [drPLIP](#plip), so that the
+  residue numbers in the file are the ones of your paper rather than drMD's continuous internal numbering.
+  `--chainMap` on the command line overrides the file.
+
+Centroids are **mass-weighted** by default, matching drMD's `COM_DISTANCE` collective variable
+(`--geometricCentre` switches to an unweighted centroid).
+
+### :anatomical_heart: outputs
+- `geometry_series.csv` — frame, time and one column per measurement;
+- `geometry_summary.csv` / `.md` — mean, sd, min, max, 5th/95th percentile and the fraction of frames below each
+  `--cutoff`;
+- `geometry_run.json` — the arguments and the measurement definitions, for provenance.
 
 ---
 
