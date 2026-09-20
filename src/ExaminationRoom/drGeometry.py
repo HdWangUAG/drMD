@@ -14,8 +14,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 ########################################################################################################
 """
-Geometric observables of a drMD trajectory: distances, centre-of-mass distances and angles between
-groups of atoms, measured with the topology that was actually simulated.
+Geometric observables of a drMD trajectory: distances, centre-of-mass distances, minimum heavy-atom
+distances and angles between groups of atoms, measured with the topology that was actually simulated.
 
 This is the counterpart of src/ExaminationRoom/drPLIP.py. PLIP tells you which interactions are
 present; this tells you how far apart a chosen pair of atoms or groups is, frame by frame, using the
@@ -35,6 +35,10 @@ A measurement file is YAML (or JSON):
         type: comDistance
         a: {chain: C, resId: 36, atoms: [C10, C11, C12]}
         b: {chain: A, resIds: [137, 140, 141, 146, 189, 199], atoms: sidechain}
+      - name: Met197-tail_closest
+        type: minDistance
+        a: {chain: A, resId: 197, atoms: sidechain}
+        b: {chain: C, resId: 36, atoms: [C10, C11, C12]}
       - name: His285_chi1
         type: torsion
         a: {chain: A, resId: 285, atom: N}
@@ -60,6 +64,15 @@ Selections: `chain` plus `resId`/`resIds`, and either `atom`/`atoms` (names), or
 `atoms: sidechain | heavy | backbone | all`. Residue numbers follow `chainMap` when one is given,
 otherwise the numbering of the topology PDB.
 
+`minDistance` is the closest approach of any heavy atom of `a` to any heavy atom of `b`, per frame - the
+number a structural reviewer means by "the residue is within 4 Å of the ligand". A centroid distance
+(`comDistance`) can read 8 Å while the side chain is in van der Waals contact, so it is not a substitute.
+Hydrogens are excluded by element whatever the selection says: `atoms: all` and `atoms: heavy` give the
+same answer, and a hydrogen named explicitly is refused rather than dropped without a word. Every pair is
+evaluated with the minimum-image convention, so a contact between two chains that straddle a periodic
+boundary is measured correctly. The number of heavy-atom pairs is capped (`maxPairs` on the measurement,
+default MIN_DISTANCE_MAX_PAIRS) so that two whole chains are refused rather than ground through.
+
 The solvent types (nearestSolvent, nearestSolventTo, solventBridge, bridgeAngle) look at the water
 oxygens of the simulated box, with the minimum-image convention, because the water that matters is
 often the one that has just diffused across a periodic boundary. They count *populations* of a
@@ -79,6 +92,14 @@ SOLVENT_RESIDUES = {"HOH", "WAT", "T3P", "TIP3", "SOL"}
 ## a water is represented by its oxygen: hydrogens wag, the oxygen is where the lone pairs are
 SOLVENT_OXYGEN_NAMES = {"O", "OW", "OH2"}
 SOLVENT_TYPES = ("nearestSolvent", "nearestSolventTo", "solventBridge", "bridgeAngle")
+
+## minDistance evaluates every heavy-atom pair between its two groups. A residue against a ligand is a few
+## hundred pairs and a ligand against a whole chain ~100,000; two whole chains run to millions, which is
+## a contact map rather than a measurement, so the type refuses above this many pairs unless the
+## measurement raises `maxPairs` deliberately. Pairs are evaluated in blocks so that the (frames, pairs)
+## matrix of a chunk stays small however large the groups are.
+MIN_DISTANCE_MAX_PAIRS = 2_000_000
+MIN_DISTANCE_PAIR_BLOCK = 50_000
 
 
 def parse_chain_map(chainMap: Optional[str]) -> List[Tuple[str, int, int, int]]:
@@ -272,6 +293,61 @@ def per_frame_angles(traj, triplets: np.ndarray, periodic: bool = True, block: i
     return out
 
 
+def heavy_atom_indices(topology, indices: Sequence[int], selection: dict, name: str) -> np.ndarray:
+    """The non-hydrogen atoms of a resolved selection, for the heavy-atom contact types.
+
+    Hydrogens are recognised by element rather than by name, because ligand hydrogens do not follow
+    the protein naming conventions. A class selection (`atoms: all`) simply loses its hydrogens - the
+    measurement is defined as a heavy-atom distance, so `all` and `heavy` mean the same thing here. An
+    atom the user named explicitly is different: quietly ignoring `atom: HB1` would return a number that
+    is not the one asked for, and that is the kind of mistake that survives a review, so it is refused.
+    """
+    wanted = selection.get("atoms", selection.get("atom", "heavy"))
+    namedExplicitly = isinstance(wanted, (list, tuple)) or (
+        isinstance(wanted, str) and wanted not in ("sidechain", "heavy", "backbone", "all"))
+    heavy, hydrogens = [], []
+    for index in indices:
+        atom = topology.atom(index)
+        if atom.element is not None and atom.element.symbol == "H":
+            hydrogens.append(atom.name)
+        else:
+            heavy.append(index)
+    if hydrogens and namedExplicitly:
+        raise ValueError(f"{name}: minDistance is a heavy-atom distance, but the selection names the "
+                         f"hydrogen(s) {sorted(set(hydrogens))}: {selection}")
+    if not heavy:
+        raise ValueError(f"{name}: selection has no heavy atoms: {selection}")
+    return np.asarray(heavy, dtype=int)
+
+
+def measure_min_distance(traj, indicesA: np.ndarray, indicesB: np.ndarray, name: str,
+                         maxPairs: int = MIN_DISTANCE_MAX_PAIRS) -> np.ndarray:
+    """Closest approach (Angstrom) between any atom of A and any atom of B, per frame.
+
+    Every pair goes through mdtraj's minimum-image code, like the solvent types: a TE chain and an ACP
+    chain can sit on opposite sides of a periodic boundary, and a naive norm would report the distance
+    to the wrong image. An exact all-pairs minimum is used rather than a cell list because, at the sizes
+    the cap allows, mdtraj evaluates a million pairs over a hundred frames in well under a second; the
+    cap exists so that an accidental chain-against-chain selection fails at once instead of quietly
+    turning a two-minute analysis into an afternoon.
+    """
+    import mdtraj as md
+
+    indicesA = np.asarray(indicesA, dtype=int)
+    indicesB = np.asarray(indicesB, dtype=int)
+    nPairs = indicesA.size * indicesB.size
+    if nPairs > maxPairs:
+        raise ValueError(f"{name}: minDistance between {indicesA.size} and {indicesB.size} heavy atoms is "
+                         f"{nPairs} pairs, above the limit of {maxPairs}; narrow the selections (a pocket "
+                         f"rather than a chain) or set 'maxPairs' on the measurement to insist")
+    pairs = np.array(np.meshgrid(indicesA, indicesB, indexing="ij")).reshape(2, -1).T
+    closest = np.full(traj.n_frames, np.inf)
+    for start in range(0, nPairs, MIN_DISTANCE_PAIR_BLOCK):
+        block = md.compute_distances(traj, pairs[start:start + MIN_DISTANCE_PAIR_BLOCK], periodic=True)
+        np.minimum(closest, block.min(axis=1), out=closest)
+    return closest * 10.0
+
+
 def measure_solvent(traj, topology, groups: Sequence[np.ndarray], measurement: dict,
                     solventIndices: Optional[np.ndarray] = None,
                     solventResidues: Optional[Sequence[str]] = None) -> np.ndarray:
@@ -332,6 +408,14 @@ def measure(traj, topology, labels, measurement: dict, massWeighted: bool = True
             groups.append(centroid(traj.xyz[:, indices, :] * 10.0, masses))
     if kind in SOLVENT_TYPES:
         return measure_solvent(traj, topology, groups, measurement, solventIndices, solventResidues)
+    if kind == "minDistance":
+        if len(groups) != 2:
+            raise ValueError(f"{measurement.get('name')}: a minDistance needs selections 'a' and 'b'")
+        name = measurement.get("name", kind)
+        heavy = [heavy_atom_indices(topology, select_atoms(topology, labels, measurement[key]), measurement[key], name)
+                 for key in ("a", "b")]
+        return measure_min_distance(traj, heavy[0], heavy[1], name,
+                                    maxPairs=int(measurement.get("maxPairs", MIN_DISTANCE_MAX_PAIRS)))
     if kind in ("distance", "comDistance"):
         if len(groups) != 2:
             raise ValueError(f"{measurement.get('name')}: a distance needs selections 'a' and 'b'")
@@ -339,7 +423,8 @@ def measure(traj, topology, labels, measurement: dict, massWeighted: bool = True
             for key in ("a", "b"):
                 if len(select_atoms(topology, labels, measurement[key])) != 1:
                     raise ValueError(f"{measurement.get('name')}: 'distance' needs one atom per selection; "
-                                     f"use type 'comDistance' for a group")
+                                     f"use type 'comDistance' (centroids) or 'minDistance' (closest "
+                                     f"heavy atoms) for a group")
         return np.linalg.norm(groups[0] - groups[1], axis=-1)
     if kind == "angle":
         if len(groups) != 3:
@@ -411,7 +496,8 @@ def summary_markdown(summary: pd.DataFrame, nFrames: int, cutoffs: Sequence[floa
 
 ########################################################################################################
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Measure distances, COM distances, angles, torsions and water bridges over a drMD trajectory.")
+    parser = argparse.ArgumentParser(description="Measure distances, COM distances, minimum heavy-atom distances, angles, torsions "
+                                                 "and water bridges over a drMD trajectory.")
     parser.add_argument("--pdb", required=True, help="topology PDB")
     parser.add_argument("--trajectory", default=None, help="DCD trajectory; omit to measure the PDB alone")
     parser.add_argument("--measurements", required=True, help="YAML/JSON file describing the measurements")

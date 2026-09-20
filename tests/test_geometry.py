@@ -272,6 +272,8 @@ def test_streaming_in_chunks_reproduces_the_whole_trajectory():
     labels = drGeometry.residue_labels(topology, None)
     specs = [{"name": "d", "type": "distance", "a": C1, "b": NE2},
              {"name": "com", "type": "comDistance", "a": {"chain": "A", "resId": 1, "atoms": "all"}, "b": NE2},
+             {"name": "min", "type": "minDistance", "a": {"chain": "A", "resId": 1, "atoms": "all"},
+              "b": {"chain": "C", "resIds": [1, 2, 3], "atoms": "all"}},
              {"name": "ang", "type": "angle", "a": O1, "b": C1, "c": NE2},
              {"name": "near", "type": "nearestSolvent", "a": C1},
              {"name": "reach", "type": "nearestSolventTo", "a": C1, "b": NE2},
@@ -319,6 +321,135 @@ def test_residue_labels_tolerate_recycled_water_numbering():
         assert "not unique" in str(error)
         return
     raise AssertionError("two non-solvent residues with the same number should be refused")
+
+
+
+########################################################################################################
+## minDistance: the closest heavy-atom approach between two groups
+def pairwise_min(indicesA, indicesB, xyz=None):
+    """Independent reference: plain Euclidean minimum over every pair, in Angstrom, hydrogens as given."""
+    coordinates = (TRAJ.xyz[0] if xyz is None else xyz) * 10.0
+    return min(np.linalg.norm(coordinates[a] - coordinates[b]) for a in indicesA for b in indicesB)
+
+
+def test_min_distance_of_two_single_atoms_equals_distance():
+    (chain1, res1), (chain2, res2) = RESIDUES[0], RESIDUES[2]
+    a, b = {"chain": chain1, "resId": res1, "atom": "C"}, {"chain": chain2, "resId": res2, "atom": "N"}
+    plain = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "d", "type": "distance", "a": a, "b": b})
+    closest = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "m", "type": "minDistance", "a": a, "b": b})
+    assert closest.shape == plain.shape == (1,)
+    assert np.isclose(closest[0], plain[0], atol=1e-4), (closest, plain)
+    print(f"    minDistance of two atoms {closest[0]:.3f} A == distance {plain[0]:.3f} A")
+
+
+def test_min_distance_of_a_group_is_the_smallest_pair_distance():
+    (chainAla, ala), (chainNme, nme) = RESIDUES[1], RESIDUES[2]
+    group = {"chain": chainAla, "resId": ala, "atoms": "heavy"}
+    single = {"chain": chainNme, "resId": nme, "atom": "C"}
+    value = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "m", "type": "minDistance", "a": group, "b": single})[0]
+    groupIndices = drGeometry.select_atoms(TOP, LABELS, group)
+    singleIndex = drGeometry.select_atoms(TOP, LABELS, single)
+    assert len(groupIndices) > 1
+    expected = pairwise_min(groupIndices, singleIndex)
+    assert np.isclose(value, expected, atol=1e-4), (value, expected)
+    ## the closest atom is not the centroid: the two types must disagree, or this test proves nothing
+    centroid = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "c", "type": "comDistance", "a": group, "b": single})[0]
+    assert not np.isclose(value, centroid, atol=1e-3)
+    ## and the order of the two groups does not matter
+    swapped = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "m", "type": "minDistance", "a": single, "b": group})[0]
+    assert np.isclose(value, swapped, atol=1e-6)
+    print(f"    minDistance {value:.3f} A == smallest of {len(groupIndices)} pair distances (centroid {centroid:.3f} A)")
+
+
+def test_min_distance_excludes_hydrogens():
+    (chainAla, ala), (chainNme, nme) = RESIDUES[1], RESIDUES[2]
+    everything = {"chain": chainNme, "resId": nme, "atoms": "all"}
+    target = {"chain": chainAla, "resId": ala, "atom": "N"}
+    allIndices = drGeometry.select_atoms(TOP, LABELS, everything)
+    heavyIndices = [i for i in allIndices if TOP.atom(i).element.symbol != "H"]
+    targetIndex = drGeometry.select_atoms(TOP, LABELS, target)
+    withHydrogens, heavyOnly = pairwise_min(allIndices, targetIndex), pairwise_min(heavyIndices, targetIndex)
+    ## this pair was chosen because the amide hydrogen is nearer than any heavy atom
+    assert withHydrogens < heavyOnly - 0.1, (withHydrogens, heavyOnly)
+    value = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "m", "type": "minDistance", "a": everything, "b": target})[0]
+    assert np.isclose(value, heavyOnly, atol=1e-4), f"expected the heavy-atom minimum {heavyOnly:.3f}, got {value:.3f}"
+    ## `all` and `heavy` are the same measurement here, by design
+    heavy = drGeometry.measure(TRAJ, TOP, LABELS, {"name": "m", "type": "minDistance",
+                                                   "a": {**everything, "atoms": "heavy"}, "b": target})[0]
+    assert np.isclose(value, heavy, atol=1e-6)
+    ## a hydrogen named explicitly is refused rather than dropped without a word
+    try:
+        drGeometry.measure(TRAJ, TOP, LABELS, {"name": "m", "type": "minDistance",
+                                               "a": {"chain": chainNme, "resId": nme, "atoms": ["N", "H"]}, "b": target})
+    except ValueError as error:
+        assert "hydrogen" in str(error) and "'H'" in str(error), error
+    else:
+        raise AssertionError("an explicitly named hydrogen should be refused by minDistance")
+    print(f"    minDistance {value:.3f} A ignores the hydrogen at {withHydrogens:.3f} A")
+
+
+def test_min_distance_refuses_oversized_selections_unless_told_otherwise():
+    (chainAla, ala), (chainNme, nme) = RESIDUES[1], RESIDUES[2]
+    spec = {"name": "big", "type": "minDistance",
+            "a": {"chain": chainAla, "resId": ala, "atoms": "heavy"},
+            "b": {"chain": chainNme, "resId": nme, "atoms": "heavy"}, "maxPairs": 3}
+    try:
+        drGeometry.measure(TRAJ, TOP, LABELS, spec)
+    except ValueError as error:
+        assert "maxPairs" in str(error) and "pairs" in str(error), error
+    else:
+        raise AssertionError("a minDistance above maxPairs should be refused")
+    ## raising the limit is a deliberate act and must give the same answer as the unlimited default
+    insisted = drGeometry.measure(TRAJ, TOP, LABELS, {**spec, "maxPairs": 10_000})[0]
+    default = drGeometry.measure(TRAJ, TOP, LABELS, {k: v for k, v in spec.items() if k != "maxPairs"})[0]
+    assert np.isclose(insisted, default, atol=1e-6)
+    ## the default cap is large enough for a ligand against a pocket, small enough to stop chain-vs-chain
+    assert 10_000 < drGeometry.MIN_DISTANCE_MAX_PAIRS < 3000 * 3000
+    ## a missing selection is reported like every other type
+    try:
+        drGeometry.measure(TRAJ, TOP, LABELS, {"name": "half", "type": "minDistance", "a": spec["a"]})
+    except ValueError as error:
+        assert "'a' and 'b'" in str(error), error
+    else:
+        raise AssertionError("a one-sided minDistance should be refused")
+    print("    oversized minDistance refused, maxPairs override and missing selection handled")
+
+
+def test_min_distance_uses_the_minimum_image_and_streams_in_blocks():
+    ## the only water near C1 (at the origin) is written just inside the opposite face of the box;
+    ## its hydrogens sit even closer once imaged, so this also checks that they are ignored
+    waters = np.array([[[BOX - 1.5, 0.0, 0.0], [10.0, 10.0, 10.0]]])
+    traj = build_system(waters)
+    labels = drGeometry.residue_labels(traj.topology, None)
+    water = {"chain": "C", "resId": 1, "atoms": "all"}
+    value = drGeometry.measure(traj, traj.topology, labels, {"name": "m", "type": "minDistance", "a": C1, "b": water})
+    assert np.isclose(value[0], 1.5, atol=1e-4), f"expected the periodic image at 1.5 A, got {value[0]:.2f}"
+    ## the pair blocking must not change the answer: force one pair per block on a two-frame system
+    spec = {"name": "m", "type": "minDistance", "a": {"chain": "A", "resId": 1, "atoms": "all"},
+            "b": {"chain": "C", "resIds": [1, 2, 3], "atoms": "all"}}
+    whole = solvent_measure(spec)
+    originalBlock = drGeometry.MIN_DISTANCE_PAIR_BLOCK
+    drGeometry.MIN_DISTANCE_PAIR_BLOCK = 1
+    try:
+        blocked = solvent_measure(spec)
+    finally:
+        drGeometry.MIN_DISTANCE_PAIR_BLOCK = originalBlock
+    assert np.allclose(whole, blocked, atol=1e-6), (whole, blocked)
+    ## in both frames the closest pair is O1 at (1.23, 0, 0) to W2 at (3, 1, 0), not C1 to W1: the
+    ## minimum runs over every atom of each group, not over the first one or the centroid
+    assert np.allclose(whole, np.hypot(3.0 - 1.23, 1.0), atol=1e-4), whole
+    print(f"    minDistance across the periodic boundary {value[0]:.2f} A; block size does not change the answer")
+
+
+def test_min_distance_summary_reports_cutoff_fractions():
+    import pandas as pd
+    spec = {"name": "closest", "type": "minDistance", "a": C1, "b": {"chain": "C", "resIds": [1, 2], "atoms": "all"}}
+    values = solvent_measure(spec)                    ## [3.0, sqrt(10)]
+    series = pd.DataFrame({"frame": np.arange(2), "timeNs": [0.0, 0.1], "closest": values})
+    row = drGeometry.summarise(series, [3.1, 3.5]).iloc[0]
+    assert row["frac_lt_3.1"] == 0.5 and row["frac_lt_3.5"] == 1.0, dict(row)
+    assert np.isclose(row["min"], 3.0) and np.isclose(row["max"], np.sqrt(10.0))
+    print("    minDistance summary: fraction below each cutoff reported as for a distance")
 
 
 if __name__ == "__main__":
