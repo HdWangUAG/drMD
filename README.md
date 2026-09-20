@@ -1100,7 +1100,7 @@ interactions are present, drGeometry tells you *how far apart* a chosen pair of 
 with the hydrogens and tautomers of the simulation, which PLIP's re-protonation discards.
 
 The same quantities define metadynamics collective variables, so a measurement file also documents the range a CV
-actually explores in unbiased MD, which is what a **biasVar** min/max and a [comDistanceWall](#comdistancewall) should be
+actually explores in unbiased MD, which is what a **biasVar** min/max and a [comDistanceWall](#restrainttype) should be
 chosen from.
 
 ```bash
