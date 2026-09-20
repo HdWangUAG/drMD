@@ -395,6 +395,50 @@ def measure_solvent(traj, topology, groups: Sequence[np.ndarray], measurement: d
     raise ValueError(f"unknown solvent measurement type '{kind}'")
 
 
+def point_probe(traj, points: Sequence[np.ndarray]):
+    """A probe trajectory holding just these per-frame points, so mdtraj's minimum-image code applies.
+
+    A DCD holds wrapped coordinates. When a partner chain drifts across a box face it comes back on
+    the other side, and a plain subtraction then reports a separation of order the box vector - tens
+    of Angstrom - for a complex that never came apart. Routing every distance, angle and torsion
+    through mdtraj keeps them on the minimum image, which is also the only code here that handles a
+    triclinic (octahedral) box correctly. Points arrive in Angstrom and are converted, because this
+    module works in Angstrom while mdtraj works in nanometres.
+    """
+    probe, _, pointSlots = probe_trajectory(traj, np.array([], dtype=int),
+                                            [point / 10.0 for point in points])
+    return probe, pointSlots
+
+
+def point_distances(traj, points: Sequence[np.ndarray]) -> np.ndarray:
+    """Minimum-image distance in Angstrom between two per-frame points."""
+    import mdtraj as md
+
+    probe, slots = point_probe(traj, points)
+    return md.compute_distances(probe, np.array([slots[:2]]), periodic=True)[:, 0] * 10.0
+
+
+def point_angles(traj, points: Sequence[np.ndarray]) -> np.ndarray:
+    """Minimum-image angle in degrees; the middle point is the vertex."""
+    import mdtraj as md
+
+    probe, slots = point_probe(traj, points)
+    return np.degrees(md.compute_angles(probe, np.array([slots[:3]]), periodic=True)[:, 0])
+
+
+def point_torsions(traj, points: Sequence[np.ndarray]) -> np.ndarray:
+    """Minimum-image torsion in degrees, in (-180, 180].
+
+    mdtraj's dihedral follows the same sign convention as the CustomTorsionForce restraint in
+    drRestraints, so a chi1 held by a restraint can be compared directly with the value measured
+    after the restraint is released.
+    """
+    import mdtraj as md
+
+    probe, slots = point_probe(traj, points)
+    return np.degrees(md.compute_dihedrals(probe, np.array([slots[:4]]), periodic=True)[:, 0])
+
+
 def measure(traj, topology, labels, measurement: dict, massWeighted: bool = True,
             solventIndices: Optional[np.ndarray] = None,
             solventResidues: Optional[Sequence[str]] = None) -> np.ndarray:
@@ -425,23 +469,16 @@ def measure(traj, topology, labels, measurement: dict, massWeighted: bool = True
                     raise ValueError(f"{measurement.get('name')}: 'distance' needs one atom per selection; "
                                      f"use type 'comDistance' (centroids) or 'minDistance' (closest "
                                      f"heavy atoms) for a group")
-        return np.linalg.norm(groups[0] - groups[1], axis=-1)
+        return point_distances(traj, groups)
     if kind == "angle":
         if len(groups) != 3:
             raise ValueError(f"{measurement.get('name')}: an angle needs selections 'a', 'b' and 'c' (b is the vertex)")
-        v1, v2 = groups[0] - groups[1], groups[2] - groups[1]
-        cosine = (v1 * v2).sum(-1) / (np.linalg.norm(v1, axis=-1) * np.linalg.norm(v2, axis=-1))
-        return np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+        return point_angles(traj, groups)
     if kind == "torsion":
         if len(groups) != 4:
             raise ValueError(f"{measurement.get('name')}: a torsion needs selections 'a', 'b', 'c' and 'd', "
                              f"in the order the dihedral runs")
-        ## IUPAC sign convention, the same one the restraint in drRestraints uses, in (-180, 180]
-        b0, axis, b2 = groups[0] - groups[1], groups[2] - groups[1], groups[3] - groups[2]
-        axis = axis / np.linalg.norm(axis, axis=-1, keepdims=True)
-        v = b0 - (b0 * axis).sum(-1, keepdims=True) * axis
-        w = b2 - (b2 * axis).sum(-1, keepdims=True) * axis
-        return np.degrees(np.arctan2((np.cross(axis, v) * w).sum(-1), (v * w).sum(-1)))
+        return point_torsions(traj, groups)
     raise ValueError(f"unknown measurement type '{kind}'")
 
 

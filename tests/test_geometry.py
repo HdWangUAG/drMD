@@ -495,6 +495,43 @@ def test_circular_statistics_handle_the_wrap():
     assert drGeometry.summarise(linear, [3.5]).iloc[0]["mean"] == 4.0
 
 
+def test_distances_angles_and_torsions_use_the_minimum_image():
+    """A partner wrapped across a box face must not read as tens of Angstrom away.
+
+    This is the bug the type used to have: a DCD holds wrapped coordinates, so a chain that drifts
+    over a face comes back on the other side and a plain subtraction reports a box-sized separation
+    for a complex that never dissociated.
+    """
+    import copy
+    traj = copy.deepcopy(TRAJ)
+    traj.unitcell_lengths = np.array([[3.0, 3.0, 3.0]], dtype=np.float32)
+    traj.unitcell_angles = np.array([[90.0, 90.0, 90.0]], dtype=np.float32)
+    chainId, number = RESIDUES[1]
+    first = {"chain": chainId, "resId": number, "atom": "N"}
+    second = {"chain": chainId, "resId": number, "atom": "CA"}
+    indexFirst = drGeometry.select_atoms(TOP, LABELS, first)[0]
+    indexSecond = drGeometry.select_atoms(TOP, LABELS, second)[0]
+
+    bonded = drGeometry.measure(traj, TOP, LABELS, {"name": "bond", "type": "distance",
+                                                    "a": first, "b": second})
+    ## push the second atom a whole box vector away: the same bond, in the next image
+    traj.xyz[:, indexSecond, 0] += 3.0
+    wrapped = drGeometry.measure(traj, TOP, LABELS, {"name": "bond", "type": "distance",
+                                                     "a": first, "b": second})
+    assert np.allclose(bonded, wrapped, atol=1e-4), (bonded, wrapped)
+    assert bonded[0] < 2.0, bonded          ## an N-CA bond, not a box vector
+    traj.xyz[:, indexSecond, 0] -= 3.0
+
+    ## and the same for a torsion, where a displaced atom would otherwise flip the dihedral
+    quartet = [{"chain": chainId, "resId": number, "atom": name} for name in ("N", "CA", "CB", "HB1")]
+    spec = dict(zip(("a", "b", "c", "d"), quartet), name="chi1-like", type="torsion")
+    before = drGeometry.measure(traj, TOP, LABELS, spec)
+    traj.xyz[:, drGeometry.select_atoms(TOP, LABELS, quartet[3])[0], 1] += 3.0
+    after = drGeometry.measure(traj, TOP, LABELS, spec)
+    assert np.allclose(before, after, atol=1e-3), (before, after)
+    print("  distance and torsion follow the minimum image across a box face")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
