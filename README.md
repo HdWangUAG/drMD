@@ -1096,10 +1096,11 @@ convention (a co-folding model, for instance) is classified by walking its bond 
 <a id="geometry"></a>
 ## :medical_symbol: Geometric observables with **drGeometry** :medical_symbol:
 
-`src/ExaminationRoom/drGeometry.py` measures distances, centre-of-mass distances and angles over a finished trajectory,
-using the topology that was actually simulated. It is the counterpart of [drPLIP](#plip): PLIP tells you *which*
-interactions are present, drGeometry tells you *how far apart* a chosen pair of atoms or groups is in every frame —
-with the hydrogens and tautomers of the simulation, which PLIP's re-protonation discards.
+`src/ExaminationRoom/drGeometry.py` measures distances, centre-of-mass distances, angles and **water-bridge geometry**
+over a finished trajectory, using the topology that was actually simulated. It is the counterpart of [drPLIP](#plip):
+PLIP tells you *which* interactions are present, drGeometry tells you *how far apart* a chosen pair of atoms or groups is
+in every frame — with the hydrogens, tautomers and **explicit solvent** of the simulation, all of which PLIP's
+re-protonation and hydrogen-stripped frames discard.
 
 The same quantities define metadynamics collective variables, so a measurement file also documents the range a CV
 actually explores in unbiased MD, which is what a **biasVar** min/max and a [comDistanceWall](#restrainttype) should be
@@ -1110,8 +1111,12 @@ python src/ExaminationRoom/drGeometry.py \
     --pdb outputs/prot/07_NPT_production/trajectory.pdb \
     --trajectory outputs/prot/07_NPT_production/trajectory.dcd \
     --measurements measurements.yaml --frameTimeNs 0.2 \
-    --cutoffs 3.5 4.0 --outDir geometry
+    --cutoffs 3.5 4.0 --stride 10 --chunk 100 --outDir geometry
 ```
+The trajectory is **streamed** (`mdtraj.iterload`) `--chunk` frames at a time, never loaded whole: a solvated
+production box is ~160,000 atoms and several GB on disk. `--chunk` only trades memory for speed — chunking cannot
+change a result (on 225 frames of the WT C12 box, `--chunk 37`, `--chunk 100` and a whole-trajectory load give
+identical series).
 
 ### :anatomical_heart: the measurement file
 ```yaml
@@ -1126,7 +1131,8 @@ measurements:
   - {name: attackAngle, type: angle,
      a: {chain: A, resId: 285, atom: NE2}, b: {chain: C, resId: 36, atom: C1}, c: {chain: C, resId: 36, atom: O1}}
 ```
-- **type**: `distance` (one atom per selection), `comDistance` (centroids of two groups) or `angle` (`b` is the vertex).
+- **type**: `distance` (one atom per selection), `comDistance` (centroids of two groups) or `angle` (`b` is the vertex),
+  plus the solvent types below.
 - **selections**: `chain` plus `resId` or `resIds`, and either `atom` / `atoms: [names]`, or a class —
   `sidechain`, `heavy`, `backbone` or `all`.
 - **chainMap**: `chainId:firstResidue-lastResidue:numberingOffset,...`, exactly as in [drPLIP](#plip), so that the
@@ -1136,11 +1142,56 @@ measurements:
 Centroids are **mass-weighted** by default, matching drMD's `COM_DISTANCE` collective variable
 (`--geometricCentre` switches to an unweighted centroid).
 
+Water residues are numbered by the PDB in a way that wraps round once past 9999, so residues that are **not** covered by
+the `chainMap` and share a number are simply left unnamed (they cannot be selected by number anyway); two *protein*
+residues sharing a number is still refused, as before.
+
+### :anatomical_heart: solvent and water bridges
+```yaml
+  - {name: nearestWater_C1, type: nearestSolvent, a: {chain: C, resId: 36, atom: C1}}
+  - {name: waterBridge_C1-His285, type: solventBridge,
+     a: {chain: C, resId: 36, atom: C1}, b: {chain: A, resId: 285, atom: NE2},
+     cutoffA: 4.5, cutoffB: 3.5}
+  - {name: thatWaterToHis285, type: nearestSolventTo,
+     a: {chain: C, resId: 36, atom: C1}, b: {chain: A, resId: 285, atom: NE2}}
+  - {name: burgiDunitz_Ow-C1=O1, type: bridgeAngle,
+     a: {chain: C, resId: 36, atom: C1}, b: {chain: C, resId: 36, atom: C1}, c: {chain: C, resId: 36, atom: O1}}
+```
+- **`nearestSolvent`** (`a`) — distance (Å) from `a` (its centroid if several atoms) to the nearest solvent oxygen, per
+  frame. "Is there a water on the carbonyl carbon at all?"
+- **`solventBridge`** (`a`, `b`, optional `cutoffA` = 4.0 Å, `cutoffB` = 3.5 Å) — the **number** of solvent oxygens that
+  are simultaneously within `cutoffA` of `a` *and* `cutoffB` of `b`. This is how a water bridging a substrate carbon and
+  a catalytic histidine nitrogen is counted. With `a` and `b` the same selection and equal cutoffs it becomes a plain
+  hydration count. The output is a count, so in the summary `frac_lt_1` is the fraction of frames with **no** such water.
+- **`nearestSolventTo`** (`a`, `b`) — take the solvent oxygen nearest to `a`, and report *its* distance to `b`. Answers
+  "does the water that is on the substrate also reach the histidine?", which a pair of independent distances cannot.
+- **`bridgeAngle`** (`a`, `b`, `c`) — take the solvent oxygen nearest to `a` and report the angle (degrees) it makes with
+  `b` as the vertex and `c` as the third point. For a Bürgi–Dunitz angle O<sub>w</sub>–C1=O1, set `a` = `b` = the
+  carbonyl carbon and `c` = the carbonyl oxygen (`a` and `b` may be the same selection).
+
+**What counts as solvent**: any residue for which mdtraj's `residue.is_water` is true, *or* whose name is in
+`--solventResidues` (default `HOH WAT T3P TIP3 SOL`), and within it only the oxygens — atoms named `O`, `OW` or `OH2`.
+Hydrogens are ignored: they wag on a timescale far below the frame interval, whereas the oxygen is where the lone pairs
+are. Give `--solventResidues` your own names for a non-standard water model, or a shorter list to exclude one.
+
+All four solvent types use the **minimum-image convention** (`periodic=True`): in an explicit-solvent box the water that
+matters is regularly an image of a water written on the far side of the cell, and a non-periodic distance would quietly
+miss it. The non-solvent types are unchanged and remain non-periodic, so a distance measured across a chain break is
+still reported as what it is.
+
+> :medical_symbol:
+> These are **populations, not kinetics**. `solventBridge` says how many waters occupy a bridging position and how often;
+> `nearestSolvent` and `bridgeAngle` say how often the geometry looks like a near-attack conformation. None of them is a
+> rate, a residence time or a barrier, and an unbiased trajectory that never crosses the barrier cannot be made to yield
+> one by counting near-attack geometry. Treat these as a description of the ground-state ensemble — the thing a QM/MM or
+> a free-energy calculation would have to start from.
+
 ### :anatomical_heart: outputs
 - `geometry_series.csv` — frame, time and one column per measurement;
 - `geometry_summary.csv` / `.md` — mean, sd, min, max, 5th/95th percentile and the fraction of frames below each
   `--cutoff`;
-- `geometry_run.json` — the arguments and the measurement definitions, for provenance.
+- `geometry_run.json` — the arguments, the number of solvent oxygens found and the measurement definitions, for
+  provenance.
 
 ---
 
