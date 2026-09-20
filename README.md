@@ -1051,7 +1051,7 @@ python src/ExaminationRoom/drPLIP.py \
     --stride 10 --frameTimeNs 0.2 \
     --ligandResidues S12 --peptideChains C D \
     --chainMap "A:1-299:83,B:300-598:83,C:599-675:0,D:676-752:0" \
-    --label WT_C12 --minFraction 0.1 --outDir plip
+    --label WT_C12 --minFraction 0.1 --nProc 8 --outDir plip
 ```
 
 ### :anatomical_heart: arguments
@@ -1065,6 +1065,8 @@ python src/ExaminationRoom/drPLIP.py \
   to the position within the chain, so `A:1-299:83` writes the first residue as `A 84`.
 - **--minFraction**: interactions seen in fewer than this fraction of frames are left out of the summary (the full list
   is always in `plip_interactions.csv`).
+- **--nProc**: PLIP is single-threaded, so frames are profiled in that many parallel processes. The result does not
+  depend on it: a run with `--nProc 8` gives exactly the same table as `--nProc 1`.
 
 ### :anatomical_heart: outputs
 - `plip_interactions.csv` — one row per interaction per frame: frame, time, view, interaction type, partner residue,

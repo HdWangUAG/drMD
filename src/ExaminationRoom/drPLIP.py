@@ -259,45 +259,65 @@ INTERACTION_FIELDS = ["label", "frame", "timeNs", "view", "site", "itype",
                       "dist", "distDA", "angle", "partnerSidechain", "partnerIsDonor", "partnerIsPositive"]
 
 
+def profile_one_frame(job: Tuple[int, str, float, str, Sequence[str], Sequence[str]]) -> List[dict]:
+    """One frame, both views. A free function so that it can run in a worker process."""
+    frameIndex, pdbFile, timeNs, label, ligandResidues, peptideChains = job
+    atoms = read_pdb_atoms(pdbFile)
+    serials = list(atoms)
+    atomsXyz = np.array([atoms[s][5] for s in serials])
+    graphGroups: Dict[str, Dict[int, str]] = {}
+    views = [("ligand", [], True)]
+    if peptideChains:
+        views.append(("peptide", list(peptideChains), False))
+    rows = []
+    for view, chains, keepMod in views:
+        for site, table, d in run_plip(pdbFile, chains, keepMod):
+            serial = nearest_atom(atomsXyz, serials, _parse_coords(d.get("LIGCOO")))
+            atomName, group = "", ""
+            if serial in atoms:
+                atomName, resName, ligChain = atoms[serial][0], atoms[serial][1], atoms[serial][2]
+                if resName in ligandResidues and re.fullmatch(r"S\d+", resName):
+                    group = ppant_group(atomName, resName)
+                elif resName in ligandResidues or d["RESTYPE_LIG"] in ligandResidues:
+                    key = f"{ligChain}:{atoms[serial][3]}"
+                    if key not in graphGroups:
+                        members = [s for s in serials if atoms[s][2] == ligChain and atoms[s][3] == atoms[serial][3]]
+                        graphGroups[key] = graph_groups(atoms, members)
+                    group = graphGroups[key].get(serial, "ligand")
+                else:
+                    group = "protein"
+            dist = d.get("DIST", d.get("DIST_H-A", d.get("CENTDIST", "")))
+            rows.append(dict(zip(INTERACTION_FIELDS, [
+                label, frameIndex, timeNs, view, site, table,
+                d["RESCHAIN"], int(d["RESNR"]), d["RESTYPE"],
+                d["RESCHAIN_LIG"], int(d["RESNR_LIG"]), d["RESTYPE_LIG"], atomName, group,
+                _to_float(dist), _to_float(d.get("DIST_D-A", "nan")),
+                _to_float(d.get("DON_ANGLE", d.get("ANGLE", "nan"))),
+                d.get("SIDECHAIN", ""), d.get("PROTISDON", ""), d.get("PROTISPOS", "")])))
+    return rows
+
+
 def profile_frames(frames: Sequence[Tuple[str, float]],
                    label: str,
                    ligandResidues: Sequence[str],
                    peptideChains: Sequence[str],
-                   outCsv: str) -> pd.DataFrame:
-    rows = []
-    for frameIndex, (pdbFile, timeNs) in enumerate(frames):
-        atoms = read_pdb_atoms(pdbFile)
-        serials = list(atoms)
-        atomsXyz = np.array([atoms[s][5] for s in serials])
-        graphGroups: Dict[str, Dict[int, str]] = {}
-        views = [("ligand", [], True)]
-        if peptideChains:
-            views.append(("peptide", list(peptideChains), False))
-        for view, chains, keepMod in views:
-            for site, table, d in run_plip(pdbFile, chains, keepMod):
-                serial = nearest_atom(atomsXyz, serials, _parse_coords(d.get("LIGCOO")))
-                atomName, group = "", ""
-                if serial in atoms:
-                    atomName, resName, ligChain = atoms[serial][0], atoms[serial][1], atoms[serial][2]
-                    if resName in ligandResidues and re.fullmatch(r"S\d+", resName):
-                        group = ppant_group(atomName, resName)
-                    elif resName in ligandResidues or d["RESTYPE_LIG"] in ligandResidues:
-                        key = f"{ligChain}:{atoms[serial][3]}"
-                        if key not in graphGroups:
-                            members = [s for s in serials if atoms[s][2] == ligChain and atoms[s][3] == atoms[serial][3]]
-                            graphGroups[key] = graph_groups(atoms, members)
-                        group = graphGroups[key].get(serial, "ligand")
-                    else:
-                        group = "protein"
-                dist = d.get("DIST", d.get("DIST_H-A", d.get("CENTDIST", "")))
-                rows.append(dict(zip(INTERACTION_FIELDS, [
-                    label, frameIndex, timeNs, view, site, table,
-                    d["RESCHAIN"], int(d["RESNR"]), d["RESTYPE"],
-                    d["RESCHAIN_LIG"], int(d["RESNR_LIG"]), d["RESTYPE_LIG"], atomName, group,
-                    _to_float(dist), _to_float(d.get("DIST_D-A", "nan")),
-                    _to_float(d.get("DON_ANGLE", d.get("ANGLE", "nan"))),
-                    d.get("SIDECHAIN", ""), d.get("PROTISDON", ""), d.get("PROTISPOS", "")])))
-        print(f"  PLIP {frameIndex + 1}/{len(frames)} {p.basename(pdbFile)}", flush=True)
+                   outCsv: str,
+                   nProc: int = 1) -> pd.DataFrame:
+    """PLIP is single-threaded, so frames are profiled in parallel processes."""
+    jobs = [(i, pdbFile, timeNs, label, list(ligandResidues), list(peptideChains))
+            for i, (pdbFile, timeNs) in enumerate(frames)]
+    rows: List[dict] = []
+    if nProc > 1 and len(jobs) > 1:
+        import multiprocessing as mp
+        with mp.get_context("spawn").Pool(min(nProc, len(jobs))) as pool:
+            for done, frameRows in enumerate(pool.imap_unordered(profile_one_frame, jobs, chunksize=1), start=1):
+                rows.extend(frameRows)
+                print(f"  PLIP {done}/{len(jobs)}", flush=True)
+    else:
+        for job in jobs:
+            rows.extend(profile_one_frame(job))
+            print(f"  PLIP {job[0] + 1}/{len(jobs)} {p.basename(job[1])}", flush=True)
+    rows.sort(key=lambda r: (r["frame"], r["view"], r["site"], r["itype"]))
     df = pd.DataFrame(rows, columns=INTERACTION_FIELDS)
     df.to_csv(outCsv, index=False)
     return df
@@ -349,6 +369,7 @@ def main() -> None:
     parser.add_argument("--label", default="run", help="label column in the output tables")
     parser.add_argument("--minFraction", type=float, default=0.1, help="report interactions present in at least this fraction of frames")
     parser.add_argument("--outDir", default="plip")
+    parser.add_argument("--nProc", type=int, default=1, help="profile this many frames in parallel (PLIP itself is single-threaded)")
     parser.add_argument("--keepSolvent", action="store_true", help="keep water and ions in the frames")
     args = parser.parse_args()
 
@@ -358,7 +379,7 @@ def main() -> None:
                           keepSolvent=args.keepSolvent)
     print(f"wrote {len(frames)} frames")
     df = profile_frames(frames, args.label, args.ligandResidues, args.peptideChains,
-                        p.join(args.outDir, "plip_interactions.csv"))
+                        p.join(args.outDir, "plip_interactions.csv"), nProc=args.nProc)
     summary = summarise(df, len(frames), args.minFraction)
     summary.to_csv(p.join(args.outDir, "plip_summary.csv"), index=False)
     with open(p.join(args.outDir, "plip_summary.md"), "w") as fh:
@@ -366,7 +387,7 @@ def main() -> None:
     with open(p.join(args.outDir, "plip_run.json"), "w") as fh:
         json.dump({"pdb": args.pdb, "trajectory": args.trajectory, "stride": args.stride, "nFrames": len(frames),
                    "ligandResidues": list(args.ligandResidues), "peptideChains": list(args.peptideChains),
-                   "chainMap": args.chainMap, "note": "hydrogens stripped; PLIP/Open Babel protonation; no water"},
+                   "chainMap": args.chainMap, "nProc": args.nProc, "note": "hydrogens stripped; PLIP/Open Babel protonation; no water"},
                   fh, indent=2)
     print(f"done: {len(df)} interactions, summary in {args.outDir}/plip_summary.md")
 
