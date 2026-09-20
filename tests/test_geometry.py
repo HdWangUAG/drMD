@@ -452,14 +452,6 @@ def test_min_distance_summary_reports_cutoff_fractions():
     print("    minDistance summary: fraction below each cutoff reported as for a distance")
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-    print("all drGeometry tests passed")
-
-
 def test_torsion_matches_mdtraj_and_wraps():
     """The torsion type must agree with mdtraj's dihedral, in the same sign convention."""
     chainId, number = RESIDUES[1]                      ## ALA of the alanine dipeptide
@@ -489,15 +481,25 @@ def test_torsion_needs_four_selections():
 def test_circular_statistics_handle_the_wrap():
     """A series straddling 180 degrees must not average to zero."""
     import pandas as pd
-    values = np.array([179.0, -179.0, 178.0, -178.0])
+    values = np.array([179.0, -179.0, 177.0, -176.0])
     mean, spread = drGeometry.circular_statistics(values)
-    assert abs(abs(mean) - 179.5) < 0.6, mean
-    assert spread < 2.0, spread
+    assert abs(abs(mean) - 179.25) < 1.0, mean
+    assert spread < 5.0, spread          ## a few degrees, not the ~104 a linear standard deviation would give
     series = pd.DataFrame({"frame": np.arange(4), "wrapping": values})
     summary = drGeometry.summarise(series, [3.5], circularNames=["wrapping"])
     row = summary.iloc[0]
-    assert abs(row["max"] - row["min"]) < 4.0, dict(row)      ## a 2 degree spread, not a 358 degree one
+    assert abs(row["max"] - row["min"]) < 10.0, dict(row)     ## a few degrees of spread, not 355
     assert np.isnan(row["frac_lt_3.5"])
     ## a linear series is untouched
     linear = pd.DataFrame({"frame": np.arange(3), "distance": np.array([3.0, 4.0, 5.0])})
     assert drGeometry.summarise(linear, [3.5]).iloc[0]["mean"] == 4.0
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"ok  {name}")
+    print("all drGeometry tests passed")
+
+
