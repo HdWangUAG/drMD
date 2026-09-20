@@ -619,7 +619,16 @@ Additional entries in the parameters dictionary depend on the type of restraints
 
 <a id="phi0"></a>
 ###### :anatomical_heart: phi0
-*(int or float)*  *Required for torsion restraints*. This is the angle in degrees that the dihedral should be constrained to
+*(int or float)*  *Required for torsion restraints*. This is the angle in degrees that the dihedral should be constrained to.
+Without a **halfWidth** the restraint takes the periodic form 0.5 * k * (1 - cos(theta - phi0))
+
+<a id="halfWidth"></a>
+###### :anatomical_heart: halfWidth
+*(int or float)*  *Optional for distance and torsion restraints*. This gives the restraint a flat bottom: no force is applied while the
+measured value is within **halfWidth** of the target (**r0** in Angstroms, or **phi0** in degrees), and beyond it the energy is
+0.5 * k * (deviation - halfWidth)^2. Use it when the target comes from a spread of observed values rather than a single one - a rotamer
+or a hydrogen bond held inside its family range, rather than pinned to the mean. Torsion deviations are wrapped into (-180, 180], so a
+target near 180 degrees behaves sensibly. Omitting **halfWidth** leaves the plain harmonic restraint unchanged
 
 <a id="upper"></a>
 ###### :anatomical_heart: upper
@@ -662,6 +671,19 @@ Example restraints syntax:
       parameters:
         k: 1000
         r0: 3
+  ## flat-bottomed torsion restraint holding a catalytic histidine chi1 inside its family range
+    - restraintType: "torsion"
+      selection:
+        keyword: "custom"
+        customSelection:
+          - {CHAIN_ID: "A", RES_NAME: "HIS", RES_ID: 202, ATOM_NAME: "N"}
+          - {CHAIN_ID: "A", RES_NAME: "HIS", RES_ID: 202, ATOM_NAME: "CA"}
+          - {CHAIN_ID: "A", RES_NAME: "HIS", RES_ID: 202, ATOM_NAME: "CB"}
+          - {CHAIN_ID: "A", RES_NAME: "HIS", RES_ID: 202, ATOM_NAME: "CG"}
+      parameters:
+        k: 500
+        phi0: -70
+        halfWidth: 20
   ## one-sided wall keeping the end of an acyl chain (ligand S12) within 14 Angstroms of a pocket residue
     - restraintType: "comDistanceWall"
       selection:
