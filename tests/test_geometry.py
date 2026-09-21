@@ -532,6 +532,41 @@ def test_distances_angles_and_torsions_use_the_minimum_image():
     print("  distance and torsion follow the minimum image across a box face")
 
 
+def test_frame_time_is_not_invented_when_the_trajectory_has_none():
+    """A trajectory with no usable time must give NaN, not a silent zero or a stride-blind guess.
+
+    OpenMM DCDs written by this pipeline carry an identical stamp on every frame, so consecutive
+    differences are zero. The old code divided that by 1000 and wrote the result as the frame
+    spacing, which put every event lifetime on a wrong clock while the distances looked fine.
+    """
+    import subprocess, tempfile, json, os, sys as _sys
+    script = p.join(ROOT, "src", "ExaminationRoom", "drGeometry.py")
+    with tempfile.TemporaryDirectory() as work:
+        measurements = p.join(work, "m.yaml")
+        ## the example PDB has no chain ID, so a chainMap supplies one
+        with open(measurements, "w") as fh:
+            fh.write(f'chainMap: "A:1-{TOP.n_residues}:0"\n'
+                     "measurements:\n"
+                     "  - name: bond\n    type: distance\n"
+                     "    a: {chain: A, resId: 2, atom: N}\n"
+                     "    b: {chain: A, resId: 2, atom: CA}\n")
+        result = subprocess.run([_sys.executable, script, "--pdb", PDB, "--measurements", measurements,
+                                 "--outDir", work], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr[-1500:]
+        run = json.load(open(p.join(work, "geometry_run.json")))
+        ## a single-frame PDB has no spacing to infer, so it must say so rather than claim a number
+        assert run["frameTimeNs"] is None, run["frameTimeNs"]
+        assert "unknown" in run["frameTimeSource"], run["frameTimeSource"]
+
+        ## and when the spacing IS given, it is taken as the time between USED frames
+        result = subprocess.run([_sys.executable, script, "--pdb", PDB, "--measurements", measurements,
+                                 "--outDir", work, "--frameTimeNs", "0.05"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr[-1500:]
+        run = json.load(open(p.join(work, "geometry_run.json")))
+        assert run["frameTimeNs"] == 0.05 and run["frameTimeSource"] == "given", run
+    print("  frame spacing: unknown stays unknown, and an explicit value is honoured")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -539,7 +539,9 @@ def main() -> None:
     parser.add_argument("--trajectory", default=None, help="DCD trajectory; omit to measure the PDB alone")
     parser.add_argument("--measurements", required=True, help="YAML/JSON file describing the measurements")
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--frameTimeNs", type=float, default=None, help="time between the used frames (ns)")
+    parser.add_argument("--frameTimeNs", type=float, default=None,
+                        help="time between the USED frames in ns, i.e. logInterval x stride. Give it "
+                             "explicitly: a DCD may carry no per-frame time, and then there is none to infer")
     parser.add_argument("--chainMap", default=None, help="overrides the chainMap of the measurement file")
     parser.add_argument("--cutoffs", nargs="*", type=float, default=[3.5, 4.0],
                         help="report the fraction of frames below each of these values")
@@ -588,10 +590,23 @@ def main() -> None:
 
     frameTimes = np.concatenate(times) if times else np.zeros(0)
     nFrames = int(frameTimes.size)
-    dt = args.frameTimeNs
-    if dt is None and nFrames > 1:
-        dt = float(frameTimes[1] - frameTimes[0]) / 1000.0
-    series = pd.DataFrame({"frame": np.arange(nFrames), "timeNs": np.arange(nFrames) * (dt or 0.0)})
+    ## The time axis has to be right or event lifetimes are read off a wrong clock. Two traps:
+    ## OpenMM's DCDs here carry no usable time (every stamp identical, so consecutive differences
+    ## are zero), and --stride means the analysed series is coarser than the file by that factor.
+    ## An unknown spacing is recorded as unknown rather than silently becoming zero.
+    dt, dtSource = args.frameTimeNs, "given"
+    if dt is None:
+        spacing = np.diff(frameTimes) if frameTimes.size > 1 else np.zeros(0)
+        usable = spacing[spacing > 0]
+        if usable.size:
+            dt = float(np.median(usable)) / 1000.0 * args.stride
+            dtSource = f"trajectory median spacing x stride {args.stride}"
+        else:
+            dt, dtSource = None, "unknown: the trajectory carries no per-frame time"
+            print("  no usable per-frame time in the trajectory; timeNs left as NaN. "
+                  "Pass --frameTimeNs (logInterval x stride) if you need a time axis", flush=True)
+    timeColumn = np.arange(nFrames) * dt if dt is not None else np.full(nFrames, np.nan)
+    series = pd.DataFrame({"frame": np.arange(nFrames), "timeNs": timeColumn})
     for measurement in measurements:
         name = measurement["name"]
         series[name] = np.concatenate(columns[name])
@@ -606,7 +621,8 @@ def main() -> None:
         fh.write(summary_markdown(summary, nFrames, args.cutoffs))
     with open(p.join(args.outDir, "geometry_run.json"), "w") as fh:
         json.dump({"pdb": args.pdb, "trajectory": args.trajectory, "stride": args.stride,
-                   "chunk": args.chunk, "nFrames": nFrames, "frameTimeNs": dt, "chainMap": chainMap,
+                   "chunk": args.chunk, "nFrames": nFrames, "frameTimeNs": dt,
+                   "frameTimeSource": dtSource, "chainMap": chainMap,
                    "cutoffs": list(args.cutoffs), "massWeighted": not args.geometricCentre,
                    "solventResidues": list(args.solventResidues),
                    "nSolventOxygens": int(solventIndices.size) if solventIndices is not None else 0,
