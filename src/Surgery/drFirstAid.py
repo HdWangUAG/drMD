@@ -51,6 +51,12 @@ def firstAid_handler():
 
         3. Step 2 will continue until either the target simulation succeeds or the max number of retries is reached
 
+    Note on firstAidMaxRetries:
+        The target simulation is always run once, firstAid only ever happens *after* it has crashed.
+        firstAidMaxRetries is therefore the number of firstAid retries allowed after that first attempt:
+        0 means "run the simulation once and do not try to rescue it", so the target simulation is run
+        a total of firstAidMaxRetries + 1 times in the worst case.
+
     Args:
         firstAid_function (callable): The function to be decorated.   
         maxRetries (int, optional): The maximum number of retries. Defaults to 10.
@@ -62,14 +68,15 @@ def firstAid_handler():
     def decorator(simulationFunction):
         @wraps(simulationFunction)
         def wrapper(*args, **kwargs):
-            ## initialise a retry counter
+            ## initialise a retry counter and a record of the error that crashed the simulation
             retries: int = 0
-            ## keep running firstAid simulations until max retries is reached or the simulation succeeds
-            maxRetries: int = kwargs["config"]["miscInfo"]["firstAidMaxRetries"]
-            if maxRetries == 0:
-                return
-            while retries < maxRetries:
-                ## try to run the simulation - if this runs without errors, the rest of this function is skipped
+            lastError: Union[Exception, None] = None
+            ## how many firstAid retries we are allowed *after* the first attempt
+            maxRetries: int = kwargs["config"]["miscInfo"].get("firstAidMaxRetries", 10)
+            ## run the simulation once, then keep running firstAid simulations
+            ## until the simulation succeeds or we run out of retries
+            while True:
+                ## try to run the simulation - if this runs without errors, the rest of this loop is skipped
                 try:
                     saveFile: Union[PathLike, str] = simulationFunction(*args, **kwargs)
                     ## in this case, some firstAid steps have been run
@@ -88,54 +95,26 @@ def firstAid_handler():
                 ## if our simulation crashes due to a numerical error or an OpenMM exception
                 ## run firstAid protocol to try and recover
                 except (OpenMMException, ValueError) as errorOpenMM:
-                    saveFile, retries = run_first_aid_protocol(retries, maxRetries, *args, **kwargs)
-                except Exception as error:
-                    drLogger.log_info(f"Unexpected Error for {kwargs['sim']['stepName']}:\n{error}", True, True)
-                    raise error
-            else:
-                ## If we have got here, the firstAid has failed
-                ## let user know and merge output reporters and trajectories
-                drLogger.log_info(f"Max retries reached. Stopping.", True, True)
-                drSplash.print_first_aid_failed("Particle coordinate NaN")
-                raise OpenMMException
-        return wrapper
-    return decorator
-
-#########################################################################################################################
-def firstAid_handler():
-    def decorator(simulationFunction):
-        @wraps(simulationFunction)
-        def wrapper(*args, **kwargs):
-            retries: int = 0
-            maxRetries: int = kwargs["config"]["miscInfo"].get("firstAidMaxRetries", 10)
-            lastError = None
-            while retries < maxRetries:
-                try:
-                    saveFile: Union[str, PathLike] = simulationFunction(*args, **kwargs)
-                    if retries > 0:
-                        drLogger.log_info(f"Success after {retries} tries.", True)
-                        runOutDir: Union[str, PathLike] = kwargs["outDir"]
-                        simDir: Union[str, PathLike] = p.join(runOutDir, kwargs["sim"]["stepName"])
-                        drSplicer.merge_partial_outputs(simDir=simDir,
-                                                        pdbFile=kwargs["refPdb"],
-                                                        simInfo=kwargs["sim"],
-                                                        config=kwargs["config"])
-                    return saveFile
-                except (OpenMMException, ValueError) as errorOpenMM:
+                    ## remember why the simulation crashed, we report this if firstAid can't rescue it
                     lastError = errorOpenMM
+                    ## with firstAidMaxRetries: 0 there is no firstAid to run, so stop here
+                    if retries >= maxRetries:
+                        break
                     saveFile, retries = run_first_aid_protocol(retries, maxRetries, *args, **kwargs)
                 except Exception as error:
                     drLogger.log_info(f"Unexpected Error for {kwargs['sim']['stepName']}:\n{error}", True, True)
                     raise error
-                retries += 1
-            
-            # If max retries are reached, raise the last caught OpenMMException or ValueError
-            drLogger.log_info(f"Max retries reached. Stopping.", True, True)
-            drSplash.print_first_aid_failed("Particle coordinate NaN")
-            if lastError:
-                raise lastError
-            else:
-                raise "Unknown Error"
+
+            ## If we have got here, the simulation has crashed and there are no firstAid retries left
+            ## let user know, reporting the error that actually crashed the simulation
+            stepName: str = kwargs.get("sim", {}).get("stepName", "unknown step")
+            if maxRetries > 0:
+                drLogger.log_info(f"Max retries reached. Stopping.", True, True)
+            drLogger.log_info(f"{stepName} failed:\n{lastError}", True, True)
+            drSplash.print_first_aid_failed(lastError)
+            if lastError is None:
+                raise RuntimeError(f"{stepName} failed for an unknown reason")
+            raise lastError
 
         return wrapper
     return decorator
