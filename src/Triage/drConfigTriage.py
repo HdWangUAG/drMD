@@ -1109,15 +1109,23 @@ def check_gamd_options(simulation: dict, disorders: dict) -> Tuple[dict, bool, d
             gamdInfo[optionName] = [value for value in allowedValues if value.lower() == optionValue.lower()][0]
             disorders["gamdInfo"][optionName] = None
 
-    ## positive numbers with defaults
-    numberOptions = {"sigma0P": ((int, float), 6.0), "sigma0D": ((int, float), 6.0), "updateInterval": (int, 50000)}
-    for optionName, (allowedTypes, defaultValue) in numberOptions.items():
+    ## numbers with defaults. sigma0P / sigma0D may be exactly 0, which switches that boost channel
+    ## off (compute_boost_parameters then gives k0 = k = 0 and dV = 0 for every frame): that is the
+    ## zero-boost null run, which exercises the whole GaMD code path at zero boost amplitude.
+    ## updateInterval is a number of steps, so it must be strictly positive.
+    numberOptions = {"sigma0P": ((int, float), 6.0, True), "sigma0D": ((int, float), 6.0, True), "updateInterval": (int, 50000, False)}
+    for optionName, (allowedTypes, defaultValue, zeroAllowed) in numberOptions.items():
         optionValue = gamdInfo.get(optionName, None)
+        problemText = f"{optionName} must be a number greater than or equal to 0 (0 switches this boost off)" if zeroAllowed \
+            else f"{optionName} must be a positive number"
         if optionValue is None:
             gamdInfo[optionName] = defaultValue
             disorders["gamdInfo"][optionName] = f"No {optionName} specified in gamdInfo, using default of {defaultValue}"
-        elif not isinstance(optionValue, allowedTypes) or isinstance(optionValue, bool) or optionValue <= 0:
-            disorders["gamdInfo"][optionName] = f"{optionName} must be a positive number"
+        elif not isinstance(optionValue, allowedTypes) or isinstance(optionValue, bool):
+            disorders["gamdInfo"][optionName] = problemText
+            gamdOptionsOk = False
+        elif optionValue < 0 or (optionValue == 0 and not zeroAllowed):
+            disorders["gamdInfo"][optionName] = problemText
             gamdOptionsOk = False
         else:
             disorders["gamdInfo"][optionName] = None

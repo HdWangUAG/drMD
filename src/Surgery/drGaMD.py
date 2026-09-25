@@ -449,11 +449,15 @@ def compute_boost_parameters(Vmax: float, Vmin: float, Vavg: float, sigmaV: floa
         k0 = (1 - sigma0/sigmaV) * (Vmax - Vmin)/(Vavg - Vmin), valid only when 0 < k0 <= 1,
         otherwise falls back to the lower bound.
 
+    sigma0 = 0 switches the boost off (k0 = k = 0, so dV = 0 for every frame) whichever threshold
+    mode is asked for. It is reported as "off" rather than reached through the upper bound's
+    k0-out-of-range fallback, so that a zero-boost null run does not log a misleading warning.
+
     Returns:
         k0 (dimensionless), k (1/energy), E (energy), thresholdModeUsed ("lower" | "upper" | "off")
     """
     energyRange: float = Vmax - Vmin
-    if energyRange <= 0 or sigmaV <= 0 or Vmax - Vavg <= 0:
+    if energyRange <= 0 or sigmaV <= 0 or Vmax - Vavg <= 0 or sigma0 <= 0:
         return 0.0, 0.0, Vmax, "off"
 
     thresholdModeUsed: str = "lower"
