@@ -4,6 +4,7 @@ from os import path as p
 import argparse
 import json
 import math
+import warnings
 
 ## NUMERICAL LIBRARIES
 import numpy as np
@@ -17,6 +18,11 @@ from typing import List, Optional, Tuple, Dict, Sequence
 KB_KCAL: float = 0.0019872041
 ## anharmonicity below which the second-order cumulant expansion is considered reliable (Miao et al. 2014)
 ANHARMONICITY_THRESHOLD: float = 0.01
+## frames per bin below which the cumulant term -0.5 * beta * var(dV) is too noisy to trust, and the
+## default minCount. Measured on alanine dipeptide, two independent GaMD replicates, 36x36 bins,
+## cumulant2: replicate-to-replicate PMF RMSD / max |diff| in kcal/mol was 2.26 / 6.77 at 10 frames
+## per bin, 0.58 / 1.70 at 100, 0.41 / 1.17 at 300 and 0.22 / 0.74 at 1000.
+MIN_FRAMES_PER_BIN: int = 300
 ########################################################################################################
 """
 Reweighting of Gaussian accelerated MD (GaMD) simulations run with drMD.
@@ -39,9 +45,13 @@ so that the free energy along A is
 Direct exponential averaging is implemented for reference only: at the boost magnitudes used in
 practice it is dominated by the few largest dV values and is very noisy.
 
-Two diagnostics decide whether a reweighted profile is usable and are reported with every PMF:
+Three diagnostics decide whether a reweighted profile is usable and are reported with every PMF:
   * the anharmonicity of the dV distribution, gamma = S_max - S (0 for a Gaussian); the cumulant
     expansion is reliable for gamma below ~0.01
+  * the occupancy of the bins actually used: how many bins were kept, how many dropped, and the
+    smallest and median number of frames among the kept bins. The variance of dV per bin is the
+    noisiest ingredient of the expansion, so bins holding fewer than MIN_FRAMES_PER_BIN frames are
+    dropped by default and a thinner profile is warned about
   * agreement between independent replicates
 
 Inputs are the gamd.log written by drGaMD (columns step, time_ps, V_total, V_dihedral, dV_P, dV_D in
@@ -123,7 +133,7 @@ def reweight_pmf(cv: np.ndarray,
                         minValues: Optional[Sequence[float]] = None,
                           maxValues: Optional[Sequence[float]] = None,
                             method: str = "cumulant2",
-                              minCount: int = 10) -> Dict:
+                              minCount: int = MIN_FRAMES_PER_BIN) -> Dict:
     """
     Potential of mean force along one or more coordinates from a GaMD trajectory.
 
@@ -135,7 +145,8 @@ def reweight_pmf(cv: np.ndarray,
         minValues, maxValues: histogram range per coordinate (default: sampled range)
         method (str): "cumulant2" (default, second-order cumulant expansion), "exp" (direct exponential
                       average, reference only) or "none" (no reweighting: the boosted distribution)
-        minCount (int): bins with fewer frames than this are left undefined (NaN)
+        minCount (int): bins with fewer frames than this are left undefined (NaN). The default,
+                        MIN_FRAMES_PER_BIN, is the point at which replicates agree; lowering it warns.
 
     Returns:
         dict with keys:
@@ -145,6 +156,10 @@ def reweight_pmf(cv: np.ndarray,
             counts (np.ndarray): frames per bin
             meanDV (np.ndarray), varDV (np.ndarray): per-bin boost statistics (kcal/mol, (kcal/mol)^2)
             anharmonicity (float): gamma of the whole dV distribution
+            minCount (int): the threshold used
+            nBinsKept (int), nBinsDropped (int): bins defined and left undefined
+            minCountKept (int), medianCountKept (float): frames in the thinnest and the median kept bin
+            occupancyOk (bool): every kept bin holds at least MIN_FRAMES_PER_BIN frames
             method (str), temperature (float), nFrames (int)
     """
     cv = np.atleast_2d(np.asarray(cv, dtype=float))
@@ -193,10 +208,22 @@ def reweight_pmf(cv: np.ndarray,
             pmf: np.ndarray = -kT * np.log(probability)
         else:
             raise ValueError(f"method must be 'cumulant2', 'exp' or 'none', got {method}")
-    pmf[counts < minCount] = np.nan
+    kept: np.ndarray = counts >= minCount
+    pmf[~kept] = np.nan
     if np.all(np.isnan(pmf)):
-        raise ValueError("No bin has enough frames to define a free energy; lower minCount or use fewer bins")
+        raise ValueError(f"No bin holds the {minCount} frames needed to define a free energy; "
+                         "use fewer bins, run longer, or lower minCount and accept a noisier profile")
     pmf -= np.nanmin(pmf)
+
+    ## per-PMF occupancy, so a profile built from nearly empty bins is visible rather than inferred
+    keptCounts: np.ndarray = counts[kept]
+    minCountKept: int = int(keptCounts.min())
+    occupancyOk: bool = bool(minCountKept >= MIN_FRAMES_PER_BIN)
+    if not occupancyOk:
+        warnings.warn(f"thin PMF: the sparsest of the {int(kept.sum())} bins used holds only {minCountKept} frames "
+                      f"(minCount = {minCount}, {MIN_FRAMES_PER_BIN} recommended). The cumulant term needs the "
+                      "variance of dV per bin, so this profile is dominated by noise even if it looks smooth.",
+                      stacklevel=2)
 
     shape: Tuple[int, ...] = tuple(bins)
     centers: List[np.ndarray] = [0.5 * (edge[1:] + edge[:-1]) for edge in edges]
@@ -207,6 +234,12 @@ def reweight_pmf(cv: np.ndarray,
             "meanDV": meanDV.reshape(shape),
             "varDV": varDV.reshape(shape),
             "anharmonicity": anharmonicity(dVUsed) if len(dVUsed) > 1 else 0.0,
+            "minCount": int(minCount),
+            "nBinsKept": int(kept.sum()),
+            "nBinsDropped": int(nBinsTotal - kept.sum()),
+            "minCountKept": minCountKept,
+            "medianCountKept": float(np.median(keptCounts)),
+            "occupancyOk": occupancyOk,
             "method": method,
             "temperature": temperature,
             "nFrames": int(len(dVUsed))}
@@ -310,7 +343,7 @@ def reweight_protocol(gamdLogs: List[str],
                                  maxValues: Optional[Sequence[float]],
                                    method: str,
                                      outDir: str,
-                                       minCount: int = 10) -> Dict:
+                                       minCount: int = MIN_FRAMES_PER_BIN) -> Dict:
     """
     Reweights each replicate (one gamd.log + one cv.csv), writes PMF CSVs and plots, and compares
     the replicates. Returns a summary dictionary (also written to reweight_summary.json).
@@ -320,7 +353,8 @@ def reweight_protocol(gamdLogs: List[str],
     os.makedirs(outDir, exist_ok=True)
     results: List[Dict] = []
     summary: Dict = {"method": method, "temperature": temperature, "columns": columns, "bins": list(bins),
-                     "anharmonicityThreshold": ANHARMONICITY_THRESHOLD, "replicates": []}
+                     "anharmonicityThreshold": ANHARMONICITY_THRESHOLD,
+                     "minCount": minCount, "minFramesPerBin": MIN_FRAMES_PER_BIN, "replicates": []}
     for repIndex, (gamdLog, cvCsv) in enumerate(zip(gamdLogs, cvCsvs)):
         merged: pd.DataFrame = align_frames(read_gamd_log(gamdLog), read_cv_csv(cvCsv))
         cv: np.ndarray = merged[columns].to_numpy()
@@ -333,6 +367,9 @@ def reweight_protocol(gamdLogs: List[str],
         summary["replicates"].append({"gamdLog": gamdLog, "cvCsv": cvCsv, "nFrames": result["nFrames"],
                                       "anharmonicity": result["anharmonicity"],
                                       "anharmonicityOk": result["anharmonicity"] < ANHARMONICITY_THRESHOLD,
+                                      "nBinsKept": result["nBinsKept"], "nBinsDropped": result["nBinsDropped"],
+                                      "minCountKept": result["minCountKept"], "medianCountKept": result["medianCountKept"],
+                                      "occupancyOk": result["occupancyOk"],
                                       "meanDV_kcal": float(merged["dV"].mean()), "stdDV_kcal": float(merged["dV"].std()),
                                       "minima": minima})
     if len(results) > 1:
@@ -357,7 +394,9 @@ def main() -> None:
     parser.add_argument("--min", nargs="+", type=float, default=None, help="lower histogram edge per coordinate")
     parser.add_argument("--max", nargs="+", type=float, default=None, help="upper histogram edge per coordinate")
     parser.add_argument("--method", default="cumulant2", choices=["cumulant2", "exp", "none"])
-    parser.add_argument("--minCount", type=int, default=10, help="bins with fewer frames are left undefined")
+    parser.add_argument("--minCount", type=int, default=MIN_FRAMES_PER_BIN,
+                        help="bins with fewer frames are left undefined (default: %(default)s, below which "
+                             "the cumulant term is too noisy for replicates to agree)")
     parser.add_argument("--outDir", default="reweighted")
     args = parser.parse_args()
     bins = args.bins if args.bins is not None else [36] * len(args.columns)
@@ -367,6 +406,9 @@ def main() -> None:
         flag = "OK" if rep["anharmonicityOk"] else "WARNING: dV distribution is not Gaussian enough for cumulant reweighting"
         print(f"{rep['gamdLog']}: {rep['nFrames']} frames, <dV> = {rep['meanDV_kcal']:.2f} +/- {rep['stdDV_kcal']:.2f} kcal/mol, "
               f"anharmonicity = {rep['anharmonicity']:.4f} [{flag}]")
+        occupancyFlag = "OK" if rep["occupancyOk"] else f"WARNING: bins this thin do not reproduce between replicates, raise --minCount to {MIN_FRAMES_PER_BIN} or use fewer bins"
+        print(f"    bins: {rep['nBinsKept']} kept, {rep['nBinsDropped']} dropped below minCount = {summary['minCount']}; "
+              f"frames per kept bin: min {rep['minCountKept']}, median {rep['medianCountKept']:.0f} [{occupancyFlag}]")
         for minimum in rep["minima"]:
             print(f"    minimum at {minimum['position']} : {minimum['freeEnergy']:.2f} kcal/mol")
     if "replicateAgreement" in summary:

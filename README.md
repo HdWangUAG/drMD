@@ -1045,12 +1045,16 @@ usable at typical boost magnitudes; direct exponential averaging (`--method exp`
 in that summary decide whether a profile is usable, and both are printed:
 
 - the **anharmonicity** of the boost distribution (`gamma = S_max − S`, 0 for a Gaussian): the cumulant expansion is reliable below ~0.01;
+- the **bin occupancy**: how many bins were kept, how many were dropped below `--minCount`, and the smallest and median number of frames
+  among the kept bins;
 - the **agreement between replicates** (RMSD and largest deviation between profiles, kcal/mol).
 
 > :medical_symbol:
-> The cumulant expansion needs the *variance* of the boost in every bin, so it needs far more frames than a plain histogram: aim for
-> hundreds of frames per bin (a 1 ps or shorter **logInterval** in `gamd_prod`, and coarse bins). With too few frames the reweighted
-> profile is dominated by noise even though the unreweighted one looks smooth.
+> The cumulant expansion needs the *variance* of the boost in every bin, so it needs far more frames than a plain histogram. Bins holding
+> fewer than `--minCount` frames (**default 300**) are left undefined, and a profile whose kept bins are thinner than that is warned about.
+> On alanine dipeptide with two independent replicates (36x36 bins), the replicate-to-replicate RMSD was 2.26 kcal/mol at 10 frames per bin
+> and 0.41 kcal/mol at 300 — at the low end one replicate put its global minimum in a sterically forbidden region. If bins are being dropped,
+> use a shorter **logInterval** in `gamd_prod` or coarser bins rather than lowering `--minCount`.
 
 > :medical_symbol:
 > Like metadynamics, GaMD gives free energies. It does not give rate constants.
