@@ -1,5 +1,6 @@
 ## BASIC PYTHON LIBRARIES
 import os
+import sys
 from os import path as p
 import numpy as np
 import yaml
@@ -77,10 +78,11 @@ def main(batchConfigYaml: Optional[FilePath] = None) -> None:
     ## create yamlDir if it doesn't exist, this will be used to store per-run yaml files
     os.makedirs(yamlDir,exist_ok=True)
     ## run simulations in serial or paralell
+    botchedSimulations: list = []
     if parallelCPU == 1:
-        run_serial(batchConfig)
+        botchedSimulations = run_serial(batchConfig)
     elif parallelCPU > 1:
-        run_parallel(batchConfig)
+        botchedSimulations = run_parallel(batchConfig)
 
     ## write a methods section if desired
     writeMyMethodsSection = batchConfig["miscInfo"].get("writeMyMethodsSection", False)
@@ -96,12 +98,20 @@ def main(batchConfigYaml: Optional[FilePath] = None) -> None:
     ## perform post simulation operations
     drCleanup.clean_up_handler(batchConfig)
 
-    drLogger.log_info("Simulations Complete!", True)
+    ## only claim success if every simulation actually finished
+    if len(botchedSimulations) > 0:
+        drLogger.log_info(f"drMD FAILED: {len(botchedSimulations)} simulation(s) did not complete, see the report above", True, True)
+    else:
+        drLogger.log_info("Simulations Complete!", True)
     ## close logging for post simulation processes
     drLogger.close_logging()
 
     ## unset envorment variables for OpenMP and OpenMM
     manage_cpu_usage_for_subprocesses("OFF")
+
+    ## exit non-zero so a wrapper script can tell a finished batch from a half-finished one
+    if len(botchedSimulations) > 0:
+        sys.exit(1)
 
 ######################################################################################################
 def manage_cpu_usage_for_subprocesses(mode: str, subprocessCpus: Optional[int] = None) -> None:
@@ -130,7 +140,7 @@ def manage_cpu_usage_for_subprocesses(mode: str, subprocessCpus: Optional[int] =
 
 
 ###################################################################################################### 
-def run_serial(batchConfig: Dict) -> None:
+def run_serial(batchConfig: Dict) -> list:
     """
     Process each PDB file in the given directory serially.
 
@@ -142,7 +152,7 @@ def run_serial(batchConfig: Dict) -> None:
         simInfo (dict): Simulation information dictionary.
 
     Returns:
-        None
+        botchedSimulations (list): error data for every simulation that did not complete
     """
     botchedSimulations = []
     ## unpack batchConfig to get pdbDir
@@ -162,6 +172,7 @@ def run_serial(batchConfig: Dict) -> None:
 
     if len(botchedSimulations) > 0:
          drSplash.print_botched(botchedSimulations)
+    return botchedSimulations
 ######################################################################################################
 def handle_exceptions(e, pdbName):
     tb = traceback.extract_tb(e.__traceback__)
@@ -193,7 +204,7 @@ def handle_exceptions(e, pdbName):
 
 
 ######################################################################################################
-def run_parallel(batchConfig: Dict) -> None:
+def run_parallel(batchConfig: Dict) -> list:
     """
     Process each PDB file in the given directory in parallel using multiple worker threads.
 
@@ -206,9 +217,9 @@ def run_parallel(batchConfig: Dict) -> None:
         simInfo (dict): Simulation information dictionary.
 
     Returns:
-        None
+        botchedSimulations (list): error data for every simulation that did not complete
     """
-    
+
     ## read input directory from batchConfig
     pdbDir = batchConfig["pathInfo"]["inputDir"]
     parallelCpus: int = batchConfig["hardwareInfo"]["parallelCPU"]
@@ -222,17 +233,21 @@ def run_parallel(batchConfig: Dict) -> None:
     ## add a dummy batch to be used for printing logging
     batchedArgsWithPos = [(["dummy"], -1)] + batchedArgsWithPos
 
+    perWorkerBotchedSimulations: list = []
     try:
         ## run simulations in parallel
-        botchedSimulations = process_map(per_core_worker, batchedArgsWithPos, 
+        perWorkerBotchedSimulations = process_map(per_core_worker, batchedArgsWithPos,
                     max_workers=parallelCpus)
-    except BrokenProcessPool:
+    except BrokenProcessPool as e:
         print("BrokenProcessPool: Terminating remaining processes")
+        ## a dead pool means simulations did not complete, so it must be reported as botched too
+        perWorkerBotchedSimulations = [[handle_exceptions(e, "unknown")]]
 
-    botchedSimulations = list(itertools.chain.from_iterable(botchedSimulations))
+    botchedSimulations = list(itertools.chain.from_iterable(perWorkerBotchedSimulations))
 
     if len(botchedSimulations) > 0:
          drSplash.print_botched(botchedSimulations)
+    return botchedSimulations
 ######################################################################################################
 def per_core_worker(batchedArgsWithPos: Tuple[Dict, int]) -> None:
     """

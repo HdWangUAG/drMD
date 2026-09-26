@@ -121,6 +121,11 @@ If you have used the GitHub installation method, you can run **drMD** using the 
 ```bash
 python /path/to/drMD.py --config config.yaml
 ```
+
+**drMD** exits **0** only if every system in the batch completed. If any simulation botched, the failure report is printed and the
+exit status is **1** (`drMD.main` raises `SystemExit`), so a wrapper script or queue job can tell a finished batch from a
+half-finished one without reading the scrollback.
+
 <a id="run-as-python-module"></a>
 ## :brain: Running **drMD** as a python module
 If you have used the Pip installation method, you can import **drMD** as a python module, and as following:
