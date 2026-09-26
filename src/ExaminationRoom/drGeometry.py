@@ -60,6 +60,14 @@ A measurement file is YAML (or JSON):
         cutoffA: 4.0
         cutoffB: 3.5
 
+Topology (`--pdb`): give the Amber `prmtop`/`parm7` of the build that was simulated, or any other
+topology that names the element of every atom (PSF, mmCIF, or a PDB that fills columns 77-78). A PDB
+with a blank element column is accepted only when the elements guessed from its atom names are
+unambiguous; a tleap `*_solvated.pdb` is refused, because its names are left-justified from column 13
+and mdtraj then reads GLU HG2 as mercury, ARG HE as helium and LYS CD as cadmium - which silently
+pulls every `minDistance` short and captures every mass-weighted `comDistance` centroid.
+`--allowInferredElements` overrides the refusal, with a warning.
+
 Selections: `chain` plus `resId`/`resIds`, and either `atom`/`atoms` (names), or
 `atoms: sidechain | heavy | backbone | all`. Residue numbers follow `chainMap` when one is given,
 otherwise the numbering of the topology PDB.
@@ -100,6 +108,106 @@ SOLVENT_TYPES = ("nearestSolvent", "nearestSolventTo", "solventBridge", "bridgeA
 ## matrix of a chunk stays small however large the groups are.
 MIN_DISTANCE_MAX_PAIRS = 2_000_000
 MIN_DISTANCE_PAIR_BLOCK = 50_000
+
+## Topology formats that carry an element (or an atomic number / mass) for every atom, so that no
+## element has to be guessed from an atom name. A parameter/topology file is the preferred source.
+ELEMENT_COMPLETE_SUFFIXES = (".prmtop", ".parm7", ".psf", ".h5", ".cif", ".mmcif")
+ELEMENT_COLUMNS = slice(76, 78)     # PDB columns 77-78, the element field
+## A PDB may leave the element field blank, and mdtraj then guesses the element from the atom name.
+## The only thing that makes that guess decidable is the PDB column convention: a two-letter element
+## symbol starts in column 13, a one-letter symbol in column 14. tleap writes every atom name
+## left-justified from column 13, so with the element field also blank there is nothing left to tell
+## `CA` the alpha carbon from `CA` calcium - and mdtraj picks the two-letter reading. Measured on a
+## 162,983-atom tleap build, its `*_solvated.pdb` and the prmtop of the same atoms in the same order
+## disagree on 2,266 elements: HG/HG1/HG2/HG3 -> mercury (546) and HE/HE1/HE2/HE3 -> helium (274),
+## which promotes 820 hydrogens to heavy atoms and so pulls every `minDistance` short and inflates
+## every contact fraction; plus CA -> calcium, CD -> cadmium, CE -> cerium, NE -> neon,
+## ND -> neodymium and SG -> seaborgium, whose masses are 3-12x too large and so capture every
+## mass-weighted `comDistance` centroid. All of it silent, and all of it looks like data.
+##
+## So the guess is checked rather than trusted: the first letter of an atom name is itself a common
+## element symbol in a biomolecule, and if mdtraj has read the first *two* letters as a symbol
+## instead, that atom is ambiguous by construction and the topology is refused. A conventionally
+## written PDB (one-letter names indented to column 14) has no such atoms and is accepted.
+AMBIGUOUS_LEADING_ELEMENTS = frozenset("HCNOPS")
+
+
+def count_blank_element_records(pdbPath: str) -> Tuple[int, int]:
+    """(records with a blank element field, total ATOM/HETATM records) of a PDB file."""
+    blank = total = 0
+    with open(pdbPath, "r", errors="replace") as fh:
+        for line in fh:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            total += 1
+            if not line[ELEMENT_COLUMNS].strip():
+                blank += 1
+    return blank, total
+
+
+def ambiguous_element_atoms(topology) -> Dict[str, str]:
+    """{atom name: guessed element symbol} for atoms whose element cannot be read off the name.
+
+    An atom is ambiguous when its guessed symbol is two letters, the first of those letters is a
+    common biomolecular element on its own, and the symbol simply spells the first two letters of
+    the name - i.e. ARG HG read as mercury rather than as the gamma hydrogen. `ZN` -> zinc is not
+    ambiguous (Z names no element), and `CB` is not either (Cb names no element, so mdtraj already
+    read it as carbon).
+    """
+    ambiguous: Dict[str, str] = {}
+    for atom in topology.atoms:
+        element = atom.element
+        if element is None or len(element.symbol) != 2:
+            continue
+        name = atom.name.strip().upper()
+        if len(name) < 2 or name[0] not in AMBIGUOUS_LEADING_ELEMENTS:
+            continue
+        if element.symbol.upper() == name[:2]:
+            ambiguous[atom.name] = element.symbol
+    return ambiguous
+
+
+def load_topology(path: str, allowInferredElements: bool = False):
+    """The topology to interpret a trajectory with. Returns (topology, elementSource).
+
+    An Amber `prmtop`/`parm7` (or a PSF, or an mmCIF) states the element of every atom, so it is the
+    right topology for a trajectory that came out of such a build, and it is loaded as-is. A PDB is
+    accepted when it fills the element field, and when it does not, only if the elements mdtraj
+    guesses from the atom names are unambiguous. A tleap `*_solvated.pdb` is not: it is refused,
+    naming the atoms it would have got wrong. `allowInferredElements` forces it through with a
+    warning, for a topology that genuinely has no element column and no other source.
+    """
+    import mdtraj as md
+
+    if path.lower().endswith(ELEMENT_COMPLETE_SUFFIXES):
+        return md.load_topology(path), "topology file"
+    topology = md.load(path).topology
+    blank, total = count_blank_element_records(path)
+    if not total or not blank:
+        return topology, "PDB element column"
+    ambiguous = ambiguous_element_atoms(topology)
+    if not ambiguous:
+        print(f"note: {path} leaves the element column (77-78) blank on {blank} of {total} atom "
+              f"records, so elements were inferred from atom names; no ambiguous name was found.",
+              flush=True)
+        return topology, "inferred from unambiguous atom names"
+    fakeHydrogens = sorted(name for name in ambiguous if name.strip().upper().startswith("H"))
+    detail = ", ".join(f"{name} -> {symbol}" for name, symbol in sorted(ambiguous.items())[:12])
+    if not allowInferredElements:
+        raise ValueError(
+            f"{path}: the element column (77-78) is blank on {blank} of {total} ATOM/HETATM records, "
+            f"and {len(ambiguous)} distinct atom names would then be given the wrong element: "
+            f"{detail}{' ...' if len(ambiguous) > 12 else ''}. "
+            f"{len(fakeHydrogens)} of those are hydrogens ({', '.join(fakeHydrogens[:8])}) that would "
+            f"count as heavy atoms, which pulls every minDistance short and inflates every contact "
+            f"fraction; the rest carry masses several times too large and capture every mass-weighted "
+            f"comDistance centroid. Pass the Amber prmtop/parm7 of this build instead - it names every "
+            f"element and describes the same atoms in the same order. --allowInferredElements forces "
+            f"the guess through, but do not publish a minDistance or comDistance measured that way.")
+    print(f"WARNING: {path} has a blank element column and {len(ambiguous)} ambiguous atom names "
+          f"({detail}); {len(fakeHydrogens)} hydrogens are being counted as heavy atoms. "
+          f"minDistance and mass-weighted comDistance are NOT trustworthy.", flush=True)
+    return topology, "guessed from ambiguous atom names"
 
 
 def parse_chain_map(chainMap: Optional[str]) -> List[Tuple[str, int, int, int]]:
@@ -535,7 +643,9 @@ def summary_markdown(summary: pd.DataFrame, nFrames: int, cutoffs: Sequence[floa
 def main() -> None:
     parser = argparse.ArgumentParser(description="Measure distances, COM distances, minimum heavy-atom distances, angles, torsions "
                                                  "and water bridges over a drMD trajectory.")
-    parser.add_argument("--pdb", required=True, help="topology PDB")
+    parser.add_argument("--pdb", required=True,
+                        help="topology: an Amber prmtop/parm7, a PSF, an mmCIF, or a PDB that fills "
+                             "its element column. Prefer the prmtop of the build that was simulated")
     parser.add_argument("--trajectory", default=None, help="DCD trajectory; omit to measure the PDB alone")
     parser.add_argument("--measurements", required=True, help="YAML/JSON file describing the measurements")
     parser.add_argument("--stride", type=int, default=1)
@@ -550,6 +660,10 @@ def main() -> None:
                         help="frames held in memory at once; a solvated trajectory does not fit whole")
     parser.add_argument("--solventResidues", nargs="*", default=sorted(SOLVENT_RESIDUES),
                         help="residue names counted as solvent, on top of mdtraj's is_water")
+    parser.add_argument("--allowInferredElements", action="store_true",
+                        help="accept a PDB topology with a blank element column and guess elements "
+                             "from atom names. Wrong for HG/HE/CA/CD/CE/NE/ND/SG; use only as a last "
+                             "resort, and do not publish minDistance or comDistance measured this way")
     parser.add_argument("--outDir", default="geometry")
     args = parser.parse_args()
 
@@ -560,7 +674,11 @@ def main() -> None:
     measurements = spec["measurements"] if isinstance(spec, dict) else spec
     chainMap = args.chainMap or (spec.get("chainMap") if isinstance(spec, dict) else None)
 
-    topology = md.load(args.pdb).topology
+    topology, elementSource = load_topology(args.pdb, args.allowInferredElements)
+    print(f"topology: {args.pdb} ({topology.n_atoms} atoms, elements from {elementSource})", flush=True)
+    if not args.trajectory and args.pdb.lower().endswith(ELEMENT_COMPLETE_SUFFIXES):
+        parser.error(f"{args.pdb} carries no coordinates, so there is nothing to measure without "
+                     f"--trajectory. Give the trajectory, or pass a coordinate file as --pdb")
     labels = residue_labels(topology, chainMap, args.solventResidues)
     ## scanning 50,000 residues once, rather than once per measurement per chunk
     solventIndices = (solvent_oxygen_indices(topology, args.solventResidues)
@@ -620,7 +738,8 @@ def main() -> None:
     with open(p.join(args.outDir, "geometry_summary.md"), "w") as fh:
         fh.write(summary_markdown(summary, nFrames, args.cutoffs))
     with open(p.join(args.outDir, "geometry_run.json"), "w") as fh:
-        json.dump({"pdb": args.pdb, "trajectory": args.trajectory, "stride": args.stride,
+        json.dump({"pdb": args.pdb, "elementSource": elementSource,
+                   "trajectory": args.trajectory, "stride": args.stride,
                    "chunk": args.chunk, "nFrames": nFrames, "frameTimeNs": dt,
                    "frameTimeSource": dtSource, "chainMap": chainMap,
                    "cutoffs": list(args.cutoffs), "massWeighted": not args.geometricCentre,
